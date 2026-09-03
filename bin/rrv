@@ -37,7 +37,10 @@ USAGE
 need_detect() { load_profile "$1"; cache_load; rmw_load; }
 
 cmd_init() {
-  local p="${1:-default}" f="$RRV_ROOT/config/$p.env"
+  # Split: within a single `local`, every argument is expanded before any
+  # assignment takes effect, so "$p" here would still be the old (empty) value.
+  local p="${1:-default}"
+  local f="$RRV_ROOT/config/$p.env"
   [ -e "$f" ] && die "$f already exists"
   mkdir -p "$RRV_ROOT/config"
   sed "s/^PROFILE_NAME=.*/PROFILE_NAME=$p/" "$RRV_ROOT/config/default.env.template" > "$f"
