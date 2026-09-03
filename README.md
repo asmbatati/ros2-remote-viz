@@ -6,11 +6,12 @@ and starts whatever that needs. rviz2 then runs on **your** GPU, with only ROS
 topics crossing the network.
 
 ```
-rrv init                 # write config/default.env
+./bin/rrv install            # put rrv on your PATH, then just use `rrv`
+rrv init                     # write config/default.env
 $EDITOR config/default.env   # set REMOTE_SSH
-rrv detect               # probe both machines
-rrv build                # build the local rviz2 image, if needed
-rrv rviz                 # rviz2 on your screen
+rrv detect                   # probe both machines
+rrv build                    # build the local rviz2 image, if needed
+rrv rviz                     # rviz2 on your screen
 ```
 
 ## Why this exists
@@ -41,19 +42,36 @@ distro, while keeping the GPU, so you get matching ROS and local rendering.
 
 | | |
 |---|---|
+| `rrv install` | Symlink `rrv` into `~/.local/bin` so it runs from any directory |
+| `rrv configs` | List the `.rviz` layouts in `rviz/` |
 | `rrv detect` | Probe both machines, choose an RMW and a run mode, cache it |
 | `rrv plan` | Show what was chosen, and why |
 | `rrv build` | Build the local rviz2 image for the remote's ROS distro |
 | `rrv up` | Start whatever daemons the chosen RMW needs |
-| `rrv rviz` | Launch rviz2 here |
+| `rrv rviz [layout]` | Launch rviz2 here, optionally with a saved layout |
 | `rrv run CMD` | Run any ros2 command here, wired to the remote graph |
 | `rrv remote CMD` | Run a command in the remote container with matching env |
 | `rrv x11` | Fallback: rviz2 inside the remote container, displayed here |
 | `rrv doctor` | Connectivity and configuration checks |
 | `rrv down` | Stop everything rrv started |
 
-All take an optional profile name; `config/<profile>.env` holds the settings, so
-one checkout can drive several robots.
+Use `-p NAME` to select a profile; `config/<NAME>.env` holds the settings, so one
+checkout can drive several robots.
+
+## rviz layouts
+
+Drop `.rviz` files into `rviz/` and open one by name:
+
+```
+rrv rviz nav          # opens rviz/nav.rviz
+rrv rviz              # opens rviz/default.rviz if it exists, else a bare rviz2
+rrv rviz ~/other.rviz # a path works too
+rrv configs           # list what is in rviz/
+```
+
+The folder is mounted read-write at the same path inside the container, so
+**Save Config** in rviz2 writes back to `rviz/` and survives the container —
+commit the file and the layout travels with the repo.
 
 ## RMW support
 

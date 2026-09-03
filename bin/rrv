@@ -5,7 +5,17 @@
 # starts whatever that pairing needs. See README.md.
 set -eo pipefail
 
-RRV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve symlinks: when installed as ~/.local/bin/rrv this must still point at
+# the checkout, not at ~/.local.
+_rrv_self="${BASH_SOURCE[0]}"
+while [ -L "$_rrv_self" ]; do
+  _rrv_link="$(readlink "$_rrv_self")"
+  case "$_rrv_link" in
+    /*) _rrv_self="$_rrv_link" ;;
+    *)  _rrv_self="$(dirname "$_rrv_self")/$_rrv_link" ;;
+  esac
+done
+RRV_ROOT="$(cd "$(dirname "$_rrv_self")/.." && pwd)"
 export RRV_ROOT
 . "$RRV_ROOT/lib/common.sh"
 . "$RRV_ROOT/lib/detect.sh"
@@ -16,12 +26,14 @@ usage() {
   cat <<USAGE
 ${C_B}rrv${C_RST} - remote ROS 2 visualisation
 
+  rrv install               symlink rrv onto your PATH so it runs from anywhere
   rrv init [profile]        create config/<profile>.env from the template
   rrv detect [profile]      probe both machines and cache the result
   rrv plan [profile]        show what detect chose, and why
   rrv build [profile]       build the local rviz2 image (docker mode only)
   rrv up [profile]          start routers/daemons the chosen RMW needs
-  rrv rviz [profile] [--]   launch rviz2 here (starts 'up' first if needed)
+  rrv rviz [config]         launch rviz2 here (starts 'up' first if needed)
+  rrv configs               list the .rviz layouts in rviz/
   rrv run [profile] CMD...  run any ros2 command here, wired to the remote graph
   rrv remote [profile] CMD  run a command in the remote container with matching env
   rrv x11 [profile]         fallback: rviz2 inside the remote container, shown here
@@ -29,7 +41,12 @@ ${C_B}rrv${C_RST} - remote ROS 2 visualisation
   rrv down [profile]        stop everything rrv started
   rrv env [profile]         print the env a node needs, for sourcing
 
-Profile defaults to 'default'. Config lives in config/<profile>.env.
+Add -p NAME to use a different profile (config/<NAME>.env); default is 'default'.
+
+Drop .rviz layouts into rviz/ and open one by name:
+  rrv rviz nav            opens rviz/nav.rviz
+  rrv rviz                opens rviz/default.rviz if present
+Layouts are mounted read-write, so saving inside rviz2 writes back to rviz/.
 USAGE
 }
 
@@ -81,6 +98,84 @@ cmd_build() {
   docker build --build-arg ROS_DISTRO="$R_DISTRO" --build-arg RMW="$P_RMW" \
     -t "$P_IMAGE" -f "$RRV_ROOT/docker/Dockerfile.rviz" "$RRV_ROOT/docker"
   ok "built $P_IMAGE"
+}
+
+# --- argument handling ------------------------------------------------------
+# Options are taken from the front of the argument list only, so everything
+# after them is passed through untouched (rrv run needs that).
+RRV_P=""            # profile from -p, empty means 'default'
+RRV_ARGS=()
+parse_opts() {
+  RRV_ARGS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -p|--profile) [ $# -ge 2 ] || die "-p needs a profile name"; RRV_P="$2"; shift 2 ;;
+      -p=*|--profile=*) RRV_P="${1#*=}"; shift ;;
+      --) shift; break ;;
+      -*) die "unknown option: $1" ;;
+      *) break ;;
+    esac
+  done
+  RRV_ARGS=("$@")
+}
+# Commands taking no positional args accept a bare profile name for convenience.
+profile_or_arg() { if [ -n "$RRV_P" ]; then echo "$RRV_P"; else echo "${1:-default}"; fi; }
+profile_only()   { if [ -n "$RRV_P" ]; then echo "$RRV_P"; else echo "default"; fi; }
+
+# --- rviz layouts -----------------------------------------------------------
+RVIZ_DIR() { echo "$RRV_ROOT/rviz"; }
+
+list_configs() {
+  local d; d="$(RVIZ_DIR)"
+  [ -d "$d" ] || return 0
+  find "$d" -maxdepth 1 -name '*.rviz' -printf '%f\n' 2>/dev/null | sort
+}
+
+# Accepts a bare name, a name with .rviz, or a path. Prints the absolute path,
+# or nothing when no layout was asked for and there is no default.
+resolve_config() {
+  local name="$1" d; d="$(RVIZ_DIR)"
+  if [ -z "$name" ]; then
+    [ -f "$d/default.rviz" ] && readlink -f "$d/default.rviz"
+    return 0
+  fi
+  local c
+  for c in "$name" "$d/$name" "$d/$name.rviz"; do
+    [ -f "$c" ] && { readlink -f "$c"; return 0; }
+  done
+  local avail; avail="$(list_configs)"
+  die "no rviz layout '$name'.
+Available in $(RVIZ_DIR):
+${avail:-  (none - drop a .rviz file there)}"
+}
+
+cmd_configs() {
+  local d; d="$(RVIZ_DIR)"
+  step "Layouts in $d"
+  local l; l="$(list_configs)"
+  if [ -z "$l" ]; then
+    dim "  (none yet - drop a .rviz file in $d)"
+  else
+    printf '%s\n' "$l" | sed 's/\.rviz$//' | sed 's/^/  /'
+    echo; dim "  open one with: rrv rviz <name>"
+  fi
+}
+
+# --- install ----------------------------------------------------------------
+cmd_install() {
+  local target="${1:-$HOME/.local/bin}"
+  mkdir -p "$target"
+  local link="$target/rrv"
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    die "$link exists and is not a symlink - move it aside first"
+  fi
+  ln -sfn "$RRV_ROOT/bin/rrv" "$link"
+  ok "linked $link -> $RRV_ROOT/bin/rrv"
+  case ":$PATH:" in
+    *":$target:"*) ok "$target is on your PATH - run 'rrv' from anywhere" ;;
+    *) warn "$target is not on your PATH. Add to ~/.bashrc:
+     export PATH=\"$target:\$PATH\"" ;;
+  esac
 }
 
 # --- X11 plumbing for local GUI containers ---------------------------------
@@ -156,30 +251,51 @@ cmd_up() {
 }
 
 cmd_rviz() {
-  local p="${1:-default}"
-  [ $# -gt 0 ] && shift
-  [ "${1:-}" = "--" ] && shift
+  local p="$1"; shift
+  local want=""
+  if [ $# -gt 0 ]; then want="$1"; shift; fi
+  # Validate inputs before starting anything, so a typo does not leave routers
+  # running behind a failed launch.
+  [ -n "${DISPLAY:-}" ] || die "DISPLAY is unset - no X display to draw on"
+  local cfg; cfg="$(resolve_config "$want")"
+  local -a cfgargs=()
+  [ -n "$cfg" ] && cfgargs=(-d "$cfg")
+
   cmd_up "$p"
   need_detect "$p"
-  [ -n "${DISPLAY:-}" ] || die "DISPLAY is unset - no X display to draw on"
+  [ -n "$cfg" ] && info "  layout        $cfg"
+
   step "Launching rviz2 ($P_MODE)"
   if [ "$P_MODE" = native ]; then
     # shellcheck disable=SC1090
     . "/opt/ros/$R_DISTRO/setup.bash"
     eval "$(rmw_local_node_env | env_exports)"
-    exec rviz2 "$@"
+    exec rviz2 "${cfgargs[@]}" "$@"
   fi
+
   setup_xauth
   build_gui_args
   build_env_args rmw_local_node_env
   build_mount_args
-  exec docker run --rm --name rrv-rviz "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" "${RRV_MOUNTARGS[@]}" \
-    "$P_IMAGE" bash -lc "source /opt/ros/$R_DISTRO/setup.bash && exec rviz2$(argv_str "$@")"
+  # Mount the layout directory read-write at the same path, so "Save Config"
+  # inside rviz2 lands back in the repo rather than vanishing with the container.
+  local -a rvizmount=()
+  [ -d "$(RVIZ_DIR)" ] && rvizmount=(-v "$(RVIZ_DIR):$(RVIZ_DIR):rw")
+  # A layout given as a path outside rviz/ needs its own mount.
+  if [ -n "$cfg" ]; then
+    case "$cfg" in
+      "$(RVIZ_DIR)"/*) ;;
+      *) rvizmount+=(-v "$cfg:$cfg:ro") ;;
+    esac
+  fi
+
+  exec docker run --rm --name rrv-rviz "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" \
+    "${RRV_MOUNTARGS[@]}" "${rvizmount[@]}" \
+    "$P_IMAGE" bash -lc "source /opt/ros/$R_DISTRO/setup.bash && exec rviz2$(argv_str "${cfgargs[@]}" "$@")"
 }
 
 cmd_run() {
-  local p="${1:-default}"
-  [ $# -gt 0 ] && shift
+  local p="$1"; shift
   need_detect "$p"
   [ $# -gt 0 ] || die "usage: rrv run [profile] <ros2 command...>"
   if [ "$P_MODE" = native ]; then
@@ -197,8 +313,7 @@ cmd_run() {
 # Run a command inside the remote container with the RMW env this plan needs.
 # Useful for smoke tests and for starting nodes that must match the local side.
 cmd_remote() {
-  local p="${1:-default}"
-  [ $# -gt 0 ] && shift
+  local p="$1"; shift
   need_detect "$p"
   [ $# -gt 0 ] || die "usage: rrv remote [profile] <command...>"
   rmw_remote_prepare
@@ -278,19 +393,22 @@ cmd_doctor() {
   [ "$fail" = 0 ] && ok "all good" || die "some checks failed"
 }
 
-case "${1:-}" in
-  init)   shift; cmd_init "$@" ;;
-  detect) shift; cmd_detect "$@" ;;
-  plan)   shift; cmd_plan "$@" ;;
-  build)  shift; cmd_build "$@" ;;
-  up)     shift; cmd_up "$@" ;;
-  rviz)   shift; cmd_rviz "$@" ;;
-  run)    shift; cmd_run "$@" ;;
-  remote) shift; cmd_remote "$@" ;;
-  env)    shift; cmd_env "$@" ;;
-  x11)    shift; cmd_x11 "$@" ;;
-  down)   shift; cmd_down "$@" ;;
-  doctor) shift; cmd_doctor "$@" ;;
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  install) parse_opts "$@"; cmd_install "${RRV_ARGS[@]}" ;;
+  init)    parse_opts "$@"; cmd_init "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  detect)  parse_opts "$@"; cmd_detect "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  plan)    parse_opts "$@"; cmd_plan   "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  build)   parse_opts "$@"; cmd_build  "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  up)      parse_opts "$@"; cmd_up     "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  down)    parse_opts "$@"; cmd_down   "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  doctor)  parse_opts "$@"; cmd_doctor "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  env)     parse_opts "$@"; cmd_env    "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  x11)     parse_opts "$@"; cmd_x11    "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  configs) parse_opts "$@"; cmd_configs ;;
+  rviz)    parse_opts "$@"; cmd_rviz   "$(profile_only)" "${RRV_ARGS[@]}" ;;
+  run)     parse_opts "$@"; cmd_run    "$(profile_only)" "${RRV_ARGS[@]}" ;;
+  remote)  parse_opts "$@"; cmd_remote "$(profile_only)" "${RRV_ARGS[@]}" ;;
   ''|-h|--help|help) usage ;;
-  *) usage; die "unknown command: $1" ;;
+  *) usage; die "unknown command: $cmd" ;;
 esac

@@ -1,3 +1,6 @@
 .cache/
 config/*.env
 !config/default.env.template
+
+# Your own layouts stay local unless you choose to commit them.
+# (delete these two lines to version-control everything in rviz/)
