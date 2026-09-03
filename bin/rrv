@@ -384,6 +384,17 @@ cmd_shell() {
 
 # Optional PATH shims so bare "ros2" reaches the remote graph.
 SHIM_CMDS_DEFAULT="ros2"
+
+# Identify a generated shim. The marker must be near the top: this script also
+# contains that text further down (in the heredoc that writes shims), and a
+# whole-file grep would match rrv itself -- which made "shim remove" delete the
+# installed rrv. Symlinks are excluded for the same reason.
+is_shim() {
+  local f="$1"
+  [ -f "$f" ] || return 1
+  [ -L "$f" ] && return 1
+  head -5 "$f" 2>/dev/null | grep -q "Installed by .rrv shim install."
+}
 cmd_shim() {
   local action="${1:-status}"; [ $# -gt 0 ] && shift
   local dir="${SHIM_DIR:-$HOME/.local/bin}"
@@ -420,16 +431,17 @@ SHIM
     remove)
       local removed=0 f
       for f in "$dir"/*; do
-        [ -f "$f" ] && grep -q "Installed by 'rrv shim install'" "$f" 2>/dev/null \
-          && { rm -f "$f"; ok "removed $f"; removed=1; }
+        if is_shim "$f"; then rm -f "$f"; ok "removed $f"; removed=1; fi
       done
       [ "$removed" = 1 ] || dim "  no rrv shims in $dir"
       ;;
     status)
       local found=0 f
       for f in "$dir"/*; do
-        [ -f "$f" ] && grep -q "Installed by 'rrv shim install'" "$f" 2>/dev/null \
-          && { info "  $f -> $(grep -o 'rrv run .*' "$f" | head -1)"; found=1; }
+        if is_shim "$f"; then
+          info "  $f -> $(sed -n 's/^exec .*bin\/rrv /rrv /p' "$f" | head -1)"
+          found=1
+        fi
       done
       [ "$found" = 1 ] || dim "  no rrv shims installed in $dir"
       ;;
