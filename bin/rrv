@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# rrv - run rviz2 on this machine against ROS 2 running in a remote container.
+#
+# Detects the ROS distro and RMW on both sides, picks a compatible pairing, and
+# starts whatever that pairing needs. See README.md.
+set -eo pipefail
+
+RRV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export RRV_ROOT
+. "$RRV_ROOT/lib/common.sh"
+. "$RRV_ROOT/lib/detect.sh"
+. "$RRV_ROOT/lib/plan.sh"
+. "$RRV_ROOT/lib/rmw/load.sh"
+
+usage() {
+  cat <<USAGE
+${C_B}rrv${C_RST} - remote ROS 2 visualisation
+
+  rrv init [profile]        create config/<profile>.env from the template
+  rrv detect [profile]      probe both machines and cache the result
+  rrv plan [profile]        show what detect chose, and why
+  rrv build [profile]       build the local rviz2 image (docker mode only)
+  rrv up [profile]          start routers/daemons the chosen RMW needs
+  rrv rviz [profile] [--]   launch rviz2 here (starts 'up' first if needed)
+  rrv run [profile] CMD...  run any ros2 command here, wired to the remote graph
+  rrv remote [profile] CMD  run a command in the remote container with matching env
+  rrv x11 [profile]         fallback: rviz2 inside the remote container, shown here
+  rrv doctor [profile]      connectivity and configuration checks
+  rrv down [profile]        stop everything rrv started
+  rrv env [profile]         print the env a node needs, for sourcing
+
+Profile defaults to 'default'. Config lives in config/<profile>.env.
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+need_detect() { load_profile "$1"; cache_load; rmw_load; }
+
+cmd_init() {
+  local p="${1:-default}" f="$RRV_ROOT/config/$p.env"
+  [ -e "$f" ] && die "$f already exists"
+  mkdir -p "$RRV_ROOT/config"
+  sed "s/^PROFILE_NAME=.*/PROFILE_NAME=$p/" "$RRV_ROOT/config/default.env.template" > "$f"
+  ok "created $f"
+  info "Edit REMOTE_SSH in it, then run: rrv detect $p"
+}
+
+cmd_detect() {
+  load_profile "${1:-default}"
+  detect_local
+  detect_remote
+  plan_build
+  L_TRANSPORT_SELF="$(detect_self_ip)"
+  echo
+  plan_show
+  cache_save \
+    "L_OS=$(printf '%q' "$L_OS")" "L_ARCH=$L_ARCH" \
+    "L_DISTROS=$(printf '%q' "$L_DISTROS")" "L_RMWS=$(printf '%q' "$L_RMWS")" \
+    "L_DOCKER=$L_DOCKER" "L_NVIDIA_RT=$L_NVIDIA_RT" \
+    "L_GPU=$(printf '%q' "$L_GPU")" "L_TRANSPORT_SELF=$L_TRANSPORT_SELF" \
+    "R_OS=$(printf '%q' "$R_OS")" "R_ARCH=$R_ARCH" "R_IPV6=$R_IPV6" \
+    "R_CONTAINER=$(printf '%q' "$R_CONTAINER")" "R_IMAGE=$(printf '%q' "$R_IMAGE")" \
+    "R_NETMODE=$R_NETMODE" "R_DISTRO=$R_DISTRO" \
+    "R_RMWS=$(printf '%q' "$R_RMWS")" "R_RMW_CUR=$(printf '%q' "$R_RMW_CUR")" \
+    "R_HAS_RVIZ=$R_HAS_RVIZ" \
+    "P_RMW=$P_RMW" "P_MODE=$P_MODE" "P_IMAGE=$P_IMAGE" \
+    "P_NEEDS_ROUTER=$P_NEEDS_ROUTER" "P_XHOST=$P_XHOST" \
+    "P_REASON=$(printf '%q' "$P_REASON")"
+  echo; ok "cached -> $(cache_file)"
+}
+
+cmd_plan() { need_detect "${1:-default}"; plan_show; }
+
+cmd_build() {
+  need_detect "${1:-default}"
+  [ "$P_MODE" = docker ] || { ok "native mode - nothing to build"; return 0; }
+  step "Building $P_IMAGE (ROS $R_DISTRO)"
+  docker build --build-arg ROS_DISTRO="$R_DISTRO" --build-arg RMW="$P_RMW" \
+    -t "$P_IMAGE" -f "$RRV_ROOT/docker/Dockerfile.rviz" "$RRV_ROOT/docker"
+  ok "built $P_IMAGE"
+}
+
+# --- X11 plumbing for local GUI containers ---------------------------------
+setup_xauth() {
+  RRV_XAUTH=/tmp/.rrv.xauth
+  : > "$RRV_XAUTH"
+  # Wildcard the address family so the cookie matches inside the container,
+  # whose hostname differs from the host's.
+  xauth nlist "$DISPLAY" 2>/dev/null | sed -e 's/^..../ffff/' \
+    | xauth -f "$RRV_XAUTH" nmerge - 2>/dev/null || true
+  chmod 644 "$RRV_XAUTH"
+}
+# Re-quote argv into a single shell-safe string. "$*" would flatten quoting and
+# break arguments containing spaces, e.g. ros2 topic pub ... "data: hello world".
+argv_str() { local a out=""; for a in "$@"; do out+=" $(printf '%q' "$a")"; done; printf '%s' "$out"; }
+
+# Docker args are built as arrays. Splicing them through an unquoted $(...)
+# would need %q escaping, whose backslashes survive into the value itself and
+# corrupt settings like ZENOH_CONFIG_OVERRIDE='["tcp/0.0.0.0:7447"]'.
+build_gui_args() {
+  RRV_GUIARGS=(--network host
+    -e "DISPLAY=$DISPLAY" -e "XAUTHORITY=$RRV_XAUTH"
+    -v /tmp/.X11-unix:/tmp/.X11-unix:rw -v "$RRV_XAUTH:$RRV_XAUTH:rw")
+  if [ "$L_NVIDIA_RT" = yes ]; then
+    RRV_GUIARGS+=(--runtime nvidia -e NVIDIA_VISIBLE_DEVICES=all
+                  -e NVIDIA_DRIVER_CAPABILITIES=all)
+  fi
+}
+# Files the RMW needs visible inside the container (e.g. a DDS XML profile).
+build_mount_args() {
+  RRV_MOUNTARGS=()
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -e "$f" ] && RRV_MOUNTARGS+=(-v "$f:$f:ro")
+  done < <(rmw_local_mounts)
+}
+# $1 = name of a function printing KEY=VALUE lines
+build_env_args() {
+  RRV_ENVARGS=()
+  local l
+  while IFS= read -r l; do [ -n "$l" ] && RRV_ENVARGS+=(-e "$l"); done < <("$1")
+}
+env_exports() { while IFS= read -r l; do [ -n "$l" ] && printf 'export %q\n' "$l"; done; }
+
+cmd_up() {
+  need_detect "${1:-default}"
+  rmw_remote_prepare
+  if [ "$P_NEEDS_ROUTER" != yes ]; then
+    ok "$P_RMW needs no daemon - peers are configured directly"
+    return 0
+  fi
+  if rsh "docker exec $R_CONTAINER pgrep -f rmw_zenohd >/dev/null 2>&1"; then
+    ok "remote router already running in $R_CONTAINER"
+  else
+    step "Starting remote router in $R_CONTAINER"
+    rsh "docker exec -d $(rmw_remote_daemon_env) $R_CONTAINER bash -lc $(printf '%q' "$(rmw_remote_daemon_cmd)")"
+    sleep 4
+    rsh "docker exec $R_CONTAINER pgrep -f rmw_zenohd >/dev/null 2>&1" \
+      && ok "remote router up" || die "remote router failed to start"
+  fi
+  if docker ps --format '{{.Names}}' | grep -qx rrv-router; then
+    ok "local router already running"
+  else
+    step "Starting local router"
+    build_env_args rmw_local_daemon_env
+    docker run -d --rm --name rrv-router --network host \
+      "${RRV_ENVARGS[@]}" "$P_IMAGE" \
+      bash -lc "$(rmw_local_daemon_cmd)" >/dev/null
+    sleep 4
+    docker ps --format '{{.Names}}' | grep -qx rrv-router \
+      && ok "local router up" || die "local router failed - check: docker logs rrv-router"
+  fi
+}
+
+cmd_rviz() {
+  local p="${1:-default}"
+  [ $# -gt 0 ] && shift
+  [ "${1:-}" = "--" ] && shift
+  cmd_up "$p"
+  need_detect "$p"
+  [ -n "${DISPLAY:-}" ] || die "DISPLAY is unset - no X display to draw on"
+  step "Launching rviz2 ($P_MODE)"
+  if [ "$P_MODE" = native ]; then
+    # shellcheck disable=SC1090
+    . "/opt/ros/$R_DISTRO/setup.bash"
+    eval "$(rmw_local_node_env | env_exports)"
+    exec rviz2 "$@"
+  fi
+  setup_xauth
+  build_gui_args
+  build_env_args rmw_local_node_env
+  build_mount_args
+  exec docker run --rm --name rrv-rviz "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" "${RRV_MOUNTARGS[@]}" \
+    "$P_IMAGE" bash -lc "source /opt/ros/$R_DISTRO/setup.bash && exec rviz2$(argv_str "$@")"
+}
+
+cmd_run() {
+  local p="${1:-default}"
+  [ $# -gt 0 ] && shift
+  need_detect "$p"
+  [ $# -gt 0 ] || die "usage: rrv run [profile] <ros2 command...>"
+  if [ "$P_MODE" = native ]; then
+    # shellcheck disable=SC1090
+    . "/opt/ros/$R_DISTRO/setup.bash"
+    eval "$(rmw_local_node_env | env_exports)"
+    exec "$@"
+  fi
+  build_env_args rmw_local_node_env
+  build_mount_args
+  exec docker run --rm -i --network host "${RRV_ENVARGS[@]}" "${RRV_MOUNTARGS[@]}" \
+    "$P_IMAGE" bash -lc "source /opt/ros/$R_DISTRO/setup.bash && exec$(argv_str "$@")"
+}
+
+# Run a command inside the remote container with the RMW env this plan needs.
+# Useful for smoke tests and for starting nodes that must match the local side.
+cmd_remote() {
+  local p="${1:-default}"
+  [ $# -gt 0 ] && shift
+  need_detect "$p"
+  [ $# -gt 0 ] || die "usage: rrv remote [profile] <command...>"
+  rmw_remote_prepare
+  local envstr="" l
+  while IFS= read -r l; do
+    [ -n "$l" ] && envstr+=" -e $(printf '%q' "$l")"
+  done < <(rmw_remote_node_env)
+  rsh "docker exec -i$envstr $R_CONTAINER bash -lc $(printf '%q' "source /opt/ros/$R_DISTRO/setup.bash && exec$(argv_str "$@")")"
+}
+
+cmd_env() {
+  need_detect "${1:-default}"
+  rmw_local_node_env | env_exports
+}
+
+# --- fallback: remote rviz2, local display ---------------------------------
+cmd_x11() {
+  need_detect "${1:-default}"
+  [ "$R_HAS_RVIZ" = yes ] || die "container '$R_CONTAINER' has no rviz2 installed"
+  [ -n "${DISPLAY:-}" ] || die "DISPLAY is unset"
+  local rport=6010
+  local dnum="${DISPLAY#*:}"; dnum="${dnum%%.*}"
+  local sock="/tmp/.X11-unix/X${dnum}"
+  [ -S "$sock" ] || die "no X socket at $sock"
+
+  # A reverse tunnel to our X socket, rather than ssh -X: where IPv6 is
+  # disabled, sshd cannot bind its X11 listener and rejects forwarding with
+  # "X11 forwarding request failed on channel 0". This needs no sudo and no
+  # sshd_config change on the remote.
+  local cookie; cookie=$(mktemp)
+  xauth nlist "$DISPLAY" | sed -e 's/^..../ffff/' | xauth -f "$cookie" nmerge -
+  scp -q -o ControlPath="$(ssh_ctl_path)" "$cookie" "$REMOTE_SSH:/tmp/.rrv.xauth"
+  rm -f "$cookie"
+
+  warn "rendering happens on the remote GPU and is streamed as X protocol;
+     expect this to be slow for pointclouds. 'rrv rviz' is the fast path."
+  step "Tunnelling $REMOTE_SSH:$rport -> $sock"
+  exec ssh -o ControlPath="$(ssh_ctl_path)" -R "$rport:$sock" "$REMOTE_SSH" \
+    "docker cp /tmp/.rrv.xauth $R_CONTAINER:/tmp/.rrv.xauth >/dev/null && \
+     docker exec -e DISPLAY=localhost:10.0 -e XAUTHORITY=/tmp/.rrv.xauth \
+       -e RMW_IMPLEMENTATION=$P_RMW $R_CONTAINER \
+       bash -lc 'source /opt/ros/$R_DISTRO/setup.bash && exec rviz2'"
+}
+
+cmd_down() {
+  need_detect "${1:-default}"
+  step "Stopping"
+  docker rm -f rrv-rviz rrv-router >/dev/null 2>&1 && ok "local containers stopped" || dim "  no local containers"
+  if [ "$P_NEEDS_ROUTER" = yes ]; then
+    rsh "docker exec $R_CONTAINER pkill -f rmw_zenohd" >/dev/null 2>&1 \
+      && ok "remote router stopped" || dim "  no remote router"
+  fi
+}
+
+cmd_doctor() {
+  need_detect "${1:-default}"
+  local fail=0
+  step "Checks"
+  rsh true 2>/dev/null && ok "ssh to $REMOTE_SSH" || { warn "ssh failed"; fail=1; }
+  if [ "$R_NETMODE" = host ]; then ok "remote container uses host networking"
+  else warn "remote container network is '$R_NETMODE' - ROS traffic cannot reach it"; fail=1; fi
+  case " $R_RMWS " in *" $P_RMW "*) ok "remote provides $P_RMW" ;;
+    *) warn "remote lacks $P_RMW"; fail=1 ;; esac
+  if [ "$R_IPV6" = 1 ]; then ok "remote has IPv6 disabled (handled: routers bind 0.0.0.0)"; fi
+  if [ "$P_NEEDS_ROUTER" = yes ]; then
+    local port; port=$(rmw_ports)
+    if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$P_XHOST/$port" 2>/dev/null; then
+      ok "$P_XHOST:$port reachable"
+    else
+      dim "  $P_XHOST:$port not open yet (expected until 'rrv up')"
+    fi
+  fi
+  [ "$P_MODE" = docker ] && { docker image inspect "$P_IMAGE" >/dev/null 2>&1 \
+    && ok "image $P_IMAGE present" || { warn "image $P_IMAGE missing - run: rrv build"; fail=1; }; }
+  [ -n "${DISPLAY:-}" ] && ok "DISPLAY=$DISPLAY" || { warn "DISPLAY unset"; fail=1; }
+  echo
+  [ "$fail" = 0 ] && ok "all good" || die "some checks failed"
+}
+
+case "${1:-}" in
+  init)   shift; cmd_init "$@" ;;
+  detect) shift; cmd_detect "$@" ;;
+  plan)   shift; cmd_plan "$@" ;;
+  build)  shift; cmd_build "$@" ;;
+  up)     shift; cmd_up "$@" ;;
+  rviz)   shift; cmd_rviz "$@" ;;
+  run)    shift; cmd_run "$@" ;;
+  remote) shift; cmd_remote "$@" ;;
+  env)    shift; cmd_env "$@" ;;
+  x11)    shift; cmd_x11 "$@" ;;
+  down)   shift; cmd_down "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  ''|-h|--help|help) usage ;;
+  *) usage; die "unknown command: $1" ;;
+esac

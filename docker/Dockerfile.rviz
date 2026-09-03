@@ -1,0 +1,23 @@
+# rviz2 for an arbitrary ROS 2 distro, so the local side can match whatever the
+# remote container runs. Cross-distro ROS 2 does not interoperate, and the host
+# OS usually cannot install the needed distro natively -- this bridges that.
+ARG ROS_DISTRO=humble
+FROM osrf/ros:${ROS_DISTRO}-desktop
+
+ARG ROS_DISTRO
+ARG RMW=rmw_zenoh_cpp
+
+# The RMW package name follows from the implementation name, except Fast DDS,
+# which ships as ros-<distro>-rmw-fastrtps-cpp and is already in -desktop.
+RUN set -eux; \
+    pkg=""; \
+    case "$RMW" in \
+      rmw_zenoh_cpp)      pkg="ros-${ROS_DISTRO}-rmw-zenoh-cpp" ;; \
+      rmw_cyclonedds_cpp) pkg="ros-${ROS_DISTRO}-rmw-cyclonedds-cpp" ;; \
+      rmw_fastrtps_cpp)   pkg="" ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends xauth mesa-utils ${pkg}; \
+    rm -rf /var/lib/apt/lists/*
+
+ENV RMW_IMPLEMENTATION=${RMW}
