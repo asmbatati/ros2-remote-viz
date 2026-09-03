@@ -1,0 +1,8 @@
+# Request a transition of the flight state machine. Intended for testing.
+# Illegal transitions are refused with success=false unless force is set.
+
+uint8 state
+bool force
+---
+bool success
+string message

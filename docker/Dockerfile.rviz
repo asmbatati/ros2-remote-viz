@@ -30,4 +30,21 @@ RUN set -eux; \
       rm -rf /var/lib/apt/lists/*; \
     fi
 
+# Interface-only mirrors of message packages that exist only on the robot,
+# produced by "rrv msgs sync". Empty unless you have run it.
+COPY msgs/ /tmp/msgs_ws/src/
+ARG ROS_DISTRO
+# No -u here: ROS's setup.sh reads AMENT_TRACE_SETUP_FILES without a default,
+# so "set -u" makes sourcing it abort.
+RUN set -ex; \
+    if [ -n "$(find /tmp/msgs_ws/src -mindepth 1 -maxdepth 1 -type d 2>/dev/null)" ]; then \
+      apt-get update; \
+      apt-get install -y --no-install-recommends python3-colcon-common-extensions; \
+      . /opt/ros/${ROS_DISTRO}/setup.sh; \
+      cd /tmp/msgs_ws; \
+      colcon build --merge-install --install-base /opt/rrv_msgs; \
+      rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    rm -rf /tmp/msgs_ws
+
 ENV RMW_IMPLEMENTATION=${RMW}

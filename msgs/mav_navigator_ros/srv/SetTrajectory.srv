@@ -1,0 +1,14 @@
+# Switch the active trajectory type and its parameters at runtime.
+# type: 0 STATIONARY, 1 CIRCLE, 2 LEMNISCATE, 3 POLYNOMIAL, 4 WAYPOINTS
+
+uint8 type
+geometry_msgs/Point origin
+float64 radius
+float64 omega
+float64 height
+geometry_msgs/Point[] waypoints
+float64[] waypoint_yaws
+bool loop
+---
+bool success
+string message

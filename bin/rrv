@@ -21,6 +21,7 @@ export RRV_ROOT
 . "$RRV_ROOT/lib/detect.sh"
 . "$RRV_ROOT/lib/plan.sh"
 . "$RRV_ROOT/lib/rmw/load.sh"
+. "$RRV_ROOT/lib/msgs.sh"
 
 usage() {
   cat <<USAGE
@@ -34,6 +35,7 @@ ${C_B}rrv${C_RST} - remote ROS 2 visualisation
   rrv up [profile]          start routers/daemons the chosen RMW needs
   rrv rviz [config]         launch rviz2 here (starts 'up' first if needed)
   rrv configs               list the .rviz layouts in rviz/
+  rrv msgs [status|sync]    find message types rviz2 is missing, and fetch them
   rrv shell                 interactive shell where plain 'ros2 ...' hits the remote
   rrv run [profile] CMD...  run any ros2 command here, wired to the remote graph
   rrv shim install|remove   make bare 'ros2' reach the remote in every shell
@@ -100,7 +102,7 @@ cmd_build() {
   [ -n "$EXTRA_APT" ] && dim "  extra packages: $EXTRA_APT"
   docker build --build-arg ROS_DISTRO="$R_DISTRO" --build-arg RMW="$P_RMW" \
     --build-arg EXTRA_APT="$EXTRA_APT" \
-    -t "$P_IMAGE" -f "$RRV_ROOT/docker/Dockerfile.rviz" "$RRV_ROOT/docker"
+    -t "$P_IMAGE" -f "$RRV_ROOT/docker/Dockerfile.rviz" "$RRV_ROOT"
   ok "built $P_IMAGE"
 }
 
@@ -216,10 +218,31 @@ build_mount_args() {
     [ -n "$f" ] && [ -e "$f" ] && RRV_MOUNTARGS+=(-v "$f:$f:ro")
   done < <(rmw_local_mounts)
 }
+# The ros2 CLI daemon binds 127.0.0.1:(11511+domain). Our containers use host
+# networking, so a daemon started by a DIFFERENT ROS distro on this machine
+# answers our CLI calls and breaks them with
+#   ResponseError: unknown tag 'rclpy.type_hash.TypeHash'
+# Topic listing still works, which makes it look like a message-definition
+# problem rather than a daemon one.
+host_daemon_pids() { pgrep -f 'ros2cli\.daemon' 2>/dev/null || true; }
+daemon_guard() {
+  local pid d
+  for pid in $(host_daemon_pids); do
+    d="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^ROS_DISTRO=//p' | head -1)"
+    [ -n "$d" ] || continue
+    [ "$d" = "$R_DISTRO" ] && continue
+    warn "stopping a ROS $d CLI daemon (pid $pid) - it shares localhost with the
+     $R_DISTRO container and would break 'ros2 topic echo'"
+    kill "$pid" 2>/dev/null || true
+  done
+  return 0
+}
+
 # Sourcing prefix for commands run in the container: base ROS, then an optional
 # overlay workspace holding locally-built message packages.
 ros_setup() {
   local c="source /opt/ros/$R_DISTRO/setup.bash"
+  c="$c; [ -f /opt/rrv_msgs/setup.bash ] && source /opt/rrv_msgs/setup.bash; true"
   [ -n "$OVERLAY_WS" ] && c="$c && [ -f '$OVERLAY_WS/install/setup.bash' ] && source '$OVERLAY_WS/install/setup.bash'; true"
   echo "$c"
 }
@@ -288,6 +311,7 @@ cmd_rviz() {
 
   cmd_up "$p"
   need_detect "$p"
+  daemon_guard
   [ -n "$cfg" ] && info "  layout        $cfg"
 
   step "Launching rviz2 ($P_MODE)"
@@ -323,6 +347,7 @@ cmd_rviz() {
 cmd_run() {
   local p="$1"; shift
   need_detect "$p"
+  daemon_guard
   [ $# -gt 0 ] || die "usage: rrv run [profile] <ros2 command...>"
   if [ "$P_MODE" = native ]; then
     # shellcheck disable=SC1090
@@ -358,6 +383,7 @@ cmd_shell() {
   local p="$1"; shift
   cmd_up "$p"
   need_detect "$p"
+  daemon_guard
   if [ "$P_MODE" = native ]; then
     step "Shell with ROS $R_DISTRO + $P_RMW (exit to leave)"
     local rc; rc="$(mktemp)"
@@ -513,6 +539,16 @@ cmd_doctor() {
   fi
   [ "$P_MODE" = docker ] && { docker image inspect "$P_IMAGE" >/dev/null 2>&1 \
     && ok "image $P_IMAGE present" || { warn "image $P_IMAGE missing - run: rrv build"; fail=1; }; }
+  local dpid foreign=0
+  for dpid in $(host_daemon_pids); do
+    local dd; dd="$(tr '\0' '\n' < "/proc/$dpid/environ" 2>/dev/null | sed -n 's/^ROS_DISTRO=//p' | head -1)"
+    [ -n "$dd" ] && [ "$dd" != "$R_DISTRO" ] && foreign=1
+  done
+  if [ "$foreign" = 1 ]; then
+    warn "a ROS CLI daemon from another distro is running; rrv will stop it on next use"
+  else
+    ok "no conflicting ros2 CLI daemon"
+  fi
   [ -n "${DISPLAY:-}" ] && ok "DISPLAY=$DISPLAY" || { warn "DISPLAY unset"; fail=1; }
   echo
   [ "$fail" = 0 ] && ok "all good" || die "some checks failed"
@@ -531,6 +567,7 @@ case "$cmd" in
   env)     parse_opts "$@"; cmd_env    "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   x11)     parse_opts "$@"; cmd_x11    "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   configs) parse_opts "$@"; cmd_configs ;;
+  msgs)    parse_opts "$@"; need_detect "$(profile_only)"; cmd_msgs "${RRV_ARGS[@]}" ;;
   shell)   parse_opts "$@"; cmd_shell   "$(profile_only)" ;;
   shim)    parse_opts "$@"; cmd_shim    "${RRV_ARGS[@]}" ;;
   rviz)    parse_opts "$@"; cmd_rviz   "$(profile_only)" "${RRV_ARGS[@]}" ;;

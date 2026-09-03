@@ -44,6 +44,7 @@ distro, while keeping the GPU, so you get matching ROS and local rendering.
 |---|---|
 | `rrv install` | Symlink `rrv` into `~/.local/bin` so it runs from any directory |
 | `rrv configs` | List the `.rviz` layouts in `rviz/` |
+| `rrv msgs [sync]` | Find message types this machine cannot decode, and fetch them |
 | `rrv detect` | Probe both machines, choose an RMW and a run mode, cache it |
 | `rrv plan` | Show what was chosen, and why |
 | `rrv build` | Build the local rviz2 image for the remote's ROS distro |
@@ -97,16 +98,44 @@ RRV_SHIM_BYPASS=1 ros2 topic list     # runs the local ros2
 ### Custom message types
 
 `ros2 topic list` works for any topic, but `ros2 topic echo` and rviz2 need the
-message *definitions* locally to deserialise a custom type. Two options in the
-profile:
+message *definitions* locally to deserialise it. `rrv msgs` works out what is
+missing and how to get it:
 
 ```
-EXTRA_APT="ros-humble-my-robot-msgs"   # baked into the image; re-run 'rrv build'
-OVERLAY_WS=/home/me/msgs_ws            # a colcon workspace, mounted and sourced
+rrv msgs          # what the graph publishes that this machine cannot decode
+rrv msgs sync     # mirror the robot-only ones into msgs/
+rrv build         # compile them into the image
 ```
 
-The overlay must be built for **this** machine's architecture — an arm64 build
-from the robot will not load on an x86 host.
+It splits the missing packages two ways:
+
+- **In apt** — it prints an `EXTRA_APT=` line to paste into your profile, so you
+  get the real released definitions.
+- **Built only on the robot** — it copies the `.msg`/`.srv`/`.action` files out
+  of the remote container into `msgs/<pkg>/`, generates an interface-only
+  `package.xml` and `CMakeLists.txt`, and `rrv build` compiles them. A mirror
+  produces identical type support, because that depends on the package name and
+  the field definitions, not on the rest of the package.
+
+`OVERLAY_WS=/path/to/ws` in the profile is the alternative if you already build
+those messages locally. It must be built for **this** machine's architecture —
+an arm64 build from the robot will not load on an x86 host.
+
+### The ros2 CLI daemon
+
+The `ros2` CLI keeps a daemon on `127.0.0.1:(11511+ROS_DOMAIN_ID)`. rrv's
+containers use host networking, so a daemon started by a *different* ROS distro
+on this machine answers their calls and breaks them with:
+
+```
+ResponseError: unknown tag 'rclpy.type_hash.TypeHash'
+```
+
+Topic *listing* still works, so this looks like a missing-message problem when
+it is not. rrv stops a foreign-distro daemon automatically before each run, and
+`rrv doctor` reports one. The reverse also holds: while rrv containers are
+running, your local `ros2` may hit *their* daemon — `RRV_SHIM_BYPASS=1` does not
+help there, so stop the containers with `rrv down` first.
 
 ## rviz layouts
 
