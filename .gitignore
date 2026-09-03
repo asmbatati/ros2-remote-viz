@@ -2,5 +2,6 @@
 config/*.env
 !config/default.env.template
 
-# Your own layouts stay local unless you choose to commit them.
-# (delete these two lines to version-control everything in rviz/)
+# Layouts are yours to keep local; commit one deliberately with:
+#   git add -f rviz/<name>.rviz
+rviz/*.rviz
