@@ -38,17 +38,30 @@ Run: rrv init $profile"
   # which is right on a LAN; override for VPNs where SSH and data take different
   # routes.
   : "${TRANSPORT_HOST:=${REMOTE_SSH#*@}}"
-  export RRV_PROFILE RMW REMOTE_CONTAINER ROS_DOMAIN_ID TRANSPORT_HOST
+  : "${EXTRA_APT:=}"
+  : "${OVERLAY_WS:=}"
+  export RRV_PROFILE RMW REMOTE_CONTAINER ROS_DOMAIN_ID TRANSPORT_HOST EXTRA_APT OVERLAY_WS
 }
 
 # --- ssh --------------------------------------------------------------------
 # One multiplexed connection for the whole run: detection makes many small
 # calls and a fresh TCP+auth handshake for each is the dominant cost.
 ssh_ctl_path() { echo "${TMPDIR:-/tmp}/rrv-%r@%h:%p"; }
+_rsh_opts() {
+  printf '%s\n' -o BatchMode=yes -o ConnectTimeout=10 \
+    -o ControlMaster=auto -o ControlPath="$(ssh_ctl_path)" -o ControlPersist=60
+}
+# Default: -n, so ssh does NOT read our stdin. Without it a control call such as
+# "rrv up" swallows input meant for whatever runs afterwards -- which silently
+# broke piping commands into `rrv shell`.
 rsh() {
-  ssh -o BatchMode=yes -o ConnectTimeout=10 \
-      -o ControlMaster=auto -o ControlPath="$(ssh_ctl_path)" -o ControlPersist=60 \
-      "$REMOTE_SSH" "$@"
+  local -a o; mapfile -t o < <(_rsh_opts)
+  ssh -n "${o[@]}" "$REMOTE_SSH" "$@"
+}
+# Use when the remote command must actually consume stdin.
+rsh_in() {
+  local -a o; mapfile -t o < <(_rsh_opts)
+  ssh "${o[@]}" "$REMOTE_SSH" "$@"
 }
 rsh_check() {
   rsh true 2>/dev/null && return 0

@@ -45,7 +45,7 @@ rmw_remote_node_env() {
 rmw_remote_prepare() {
   local tmp; tmp=$(mktemp)
   fast_write_profile "$L_TRANSPORT_SELF" "$tmp"
-  rsh "cat > $RRV_FAST_REMOTE" < "$tmp"
+  rsh_in "cat > $RRV_FAST_REMOTE" < "$tmp"
   rsh "docker cp $RRV_FAST_REMOTE $R_CONTAINER:$RRV_FAST_REMOTE >/dev/null"
   rm -f "$tmp"
 }

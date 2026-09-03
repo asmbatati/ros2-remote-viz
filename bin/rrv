@@ -34,7 +34,9 @@ ${C_B}rrv${C_RST} - remote ROS 2 visualisation
   rrv up [profile]          start routers/daemons the chosen RMW needs
   rrv rviz [config]         launch rviz2 here (starts 'up' first if needed)
   rrv configs               list the .rviz layouts in rviz/
+  rrv shell                 interactive shell where plain 'ros2 ...' hits the remote
   rrv run [profile] CMD...  run any ros2 command here, wired to the remote graph
+  rrv shim install|remove   make bare 'ros2' reach the remote in every shell
   rrv remote [profile] CMD  run a command in the remote container with matching env
   rrv x11 [profile]         fallback: rviz2 inside the remote container, shown here
   rrv doctor [profile]      connectivity and configuration checks
@@ -95,7 +97,9 @@ cmd_build() {
   need_detect "${1:-default}"
   [ "$P_MODE" = docker ] || { ok "native mode - nothing to build"; return 0; }
   step "Building $P_IMAGE (ROS $R_DISTRO)"
+  [ -n "$EXTRA_APT" ] && dim "  extra packages: $EXTRA_APT"
   docker build --build-arg ROS_DISTRO="$R_DISTRO" --build-arg RMW="$P_RMW" \
+    --build-arg EXTRA_APT="$EXTRA_APT" \
     -t "$P_IMAGE" -f "$RRV_ROOT/docker/Dockerfile.rviz" "$RRV_ROOT/docker"
   ok "built $P_IMAGE"
 }
@@ -212,6 +216,27 @@ build_mount_args() {
     [ -n "$f" ] && [ -e "$f" ] && RRV_MOUNTARGS+=(-v "$f:$f:ro")
   done < <(rmw_local_mounts)
 }
+# Sourcing prefix for commands run in the container: base ROS, then an optional
+# overlay workspace holding locally-built message packages.
+ros_setup() {
+  local c="source /opt/ros/$R_DISTRO/setup.bash"
+  [ -n "$OVERLAY_WS" ] && c="$c && [ -f '$OVERLAY_WS/install/setup.bash' ] && source '$OVERLAY_WS/install/setup.bash'; true"
+  echo "$c"
+}
+# Mount for that overlay, if configured.
+overlay_mount() {
+  RRV_OVERLAY=()
+  if [ -n "$OVERLAY_WS" ] && [ -d "$OVERLAY_WS" ]; then
+    RRV_OVERLAY=(-v "$OVERLAY_WS:$OVERLAY_WS:ro")
+  fi
+}
+# -t only when we actually have a terminal, so piping rrv run still works.
+# Must not end on a failed test: under `set -e` a non-zero return from this
+# function would abort the whole script when there is no terminal.
+tty_flags() {
+  RRV_TTY=()
+  if [ -t 0 ] && [ -t 1 ]; then RRV_TTY=(-t); fi
+}
 # $1 = name of a function printing KEY=VALUE lines
 build_env_args() {
   RRV_ENVARGS=()
@@ -279,6 +304,7 @@ cmd_rviz() {
   build_mount_args
   # Mount the layout directory read-write at the same path, so "Save Config"
   # inside rviz2 lands back in the repo rather than vanishing with the container.
+  overlay_mount
   local -a rvizmount=()
   [ -d "$(RVIZ_DIR)" ] && rvizmount=(-v "$(RVIZ_DIR):$(RVIZ_DIR):rw")
   # A layout given as a path outside rviz/ needs its own mount.
@@ -290,8 +316,8 @@ cmd_rviz() {
   fi
 
   exec docker run --rm --name rrv-rviz "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" \
-    "${RRV_MOUNTARGS[@]}" "${rvizmount[@]}" \
-    "$P_IMAGE" bash -lc "source /opt/ros/$R_DISTRO/setup.bash && exec rviz2$(argv_str "${cfgargs[@]}" "$@")"
+    "${RRV_MOUNTARGS[@]}" "${rvizmount[@]}" "${RRV_OVERLAY[@]}" \
+    "$P_IMAGE" bash -lc "$(ros_setup) && exec rviz2$(argv_str "${cfgargs[@]}" "$@")"
 }
 
 cmd_run() {
@@ -306,8 +332,10 @@ cmd_run() {
   fi
   build_env_args rmw_local_node_env
   build_mount_args
-  exec docker run --rm -i --network host "${RRV_ENVARGS[@]}" "${RRV_MOUNTARGS[@]}" \
-    "$P_IMAGE" bash -lc "source /opt/ros/$R_DISTRO/setup.bash && exec$(argv_str "$@")"
+  tty_flags
+  overlay_mount
+  exec docker run --rm -i "${RRV_TTY[@]}" --network host "${RRV_ENVARGS[@]}" "${RRV_MOUNTARGS[@]}" "${RRV_OVERLAY[@]}" \
+    "$P_IMAGE" bash -lc "$(ros_setup) && exec$(argv_str "$@")"
 }
 
 # Run a command inside the remote container with the RMW env this plan needs.
@@ -321,7 +349,92 @@ cmd_remote() {
   while IFS= read -r l; do
     [ -n "$l" ] && envstr+=" -e $(printf '%q' "$l")"
   done < <(rmw_remote_node_env)
-  rsh "docker exec -i$envstr $R_CONTAINER bash -lc $(printf '%q' "source /opt/ros/$R_DISTRO/setup.bash && exec$(argv_str "$@")")"
+  rsh_in "docker exec -i$envstr $R_CONTAINER bash -lc $(printf '%q' "$(ros_setup) && exec$(argv_str "$@")")"
+}
+
+# An interactive shell already wired to the remote graph. Inside it, plain
+# "ros2 topic list" sees the remote's topics with nothing shadowed globally.
+cmd_shell() {
+  local p="$1"; shift
+  cmd_up "$p"
+  need_detect "$p"
+  if [ "$P_MODE" = native ]; then
+    step "Shell with ROS $R_DISTRO + $P_RMW (exit to leave)"
+    local rc; rc="$(mktemp)"
+    { echo ". /opt/ros/$R_DISTRO/setup.bash"
+      rmw_local_node_env | env_exports
+      echo "PS1='(rrv:$RRV_PROFILE) \w\$ '"; } > "$rc"
+    exec bash --rcfile "$rc" -i
+  fi
+  step "Shell in $P_IMAGE ($P_RMW -> $P_XHOST). Type 'exit' to leave."
+  build_env_args rmw_local_node_env
+  build_mount_args
+  tty_flags
+  local -a gui=()
+  if [ -n "${DISPLAY:-}" ]; then setup_xauth; build_gui_args; gui=("${RRV_GUIARGS[@]}"); fi
+  [ ${#gui[@]} -eq 0 ] && gui=(--network host)
+  overlay_mount
+  local -a rvizmount=()
+  [ -d "$(RVIZ_DIR)" ] && rvizmount=(-v "$(RVIZ_DIR):$(RVIZ_DIR):rw")
+  exec docker run --rm -i "${RRV_TTY[@]}" "${gui[@]}" "${RRV_ENVARGS[@]}" \
+    "${RRV_MOUNTARGS[@]}" "${rvizmount[@]}" "${RRV_OVERLAY[@]}" \
+    -e "PS1=(rrv:$RRV_PROFILE) \w\$ " \
+    "$P_IMAGE" bash -lc "$(ros_setup) && exec bash --norc -i"
+}
+
+# Optional PATH shims so bare "ros2" reaches the remote graph.
+SHIM_CMDS_DEFAULT="ros2"
+cmd_shim() {
+  local action="${1:-status}"; [ $# -gt 0 ] && shift
+  local dir="${SHIM_DIR:-$HOME/.local/bin}"
+  local profile="${RRV_P:-default}"
+  case "$action" in
+    install)
+      local cmds="${*:-$SHIM_CMDS_DEFAULT}"
+      mkdir -p "$dir"
+      local c real
+      for c in $cmds; do
+        real="$(PATH="$(echo "$PATH" | tr ':' '\n' | grep -v "^$dir\$" | paste -sd:)" command -v "$c" || true)"
+        cat > "$dir/$c" <<SHIM
+#!/usr/bin/env bash
+# Installed by 'rrv shim install'. Forwards $c to the remote ROS graph.
+# Remove with: rrv shim remove
+# Run the local $c instead with: RRV_SHIM_BYPASS=1 $c ...
+if [ -n "\${RRV_SHIM_BYPASS:-}" ]; then
+  exec ${real:-/usr/bin/env $c} "\$@"
+fi
+exec $RRV_ROOT/bin/rrv run -p $profile $c "\$@"
+SHIM
+        chmod +x "$dir/$c"
+        ok "shim $dir/$c  ->  rrv run -p $profile $c"
+        [ -n "$real" ] && dim "     bypass: RRV_SHIM_BYPASS=1 $c ...  (runs $real)" \
+                       || warn "no local '$c' found; bypass will fail"
+      done
+      case ":$PATH:" in
+        *":$dir:"*) ;;
+        *) warn "$dir is not on your PATH - the shims will not be picked up" ;;
+      esac
+      warn "$(echo $cmds) now goes to the remote graph in every new shell.
+     Undo with: rrv shim remove"
+      ;;
+    remove)
+      local removed=0 f
+      for f in "$dir"/*; do
+        [ -f "$f" ] && grep -q "Installed by 'rrv shim install'" "$f" 2>/dev/null \
+          && { rm -f "$f"; ok "removed $f"; removed=1; }
+      done
+      [ "$removed" = 1 ] || dim "  no rrv shims in $dir"
+      ;;
+    status)
+      local found=0 f
+      for f in "$dir"/*; do
+        [ -f "$f" ] && grep -q "Installed by 'rrv shim install'" "$f" 2>/dev/null \
+          && { info "  $f -> $(grep -o 'rrv run .*' "$f" | head -1)"; found=1; }
+      done
+      [ "$found" = 1 ] || dim "  no rrv shims installed in $dir"
+      ;;
+    *) die "usage: rrv shim [install [cmd...] | remove | status]" ;;
+  esac
 }
 
 cmd_env() {
@@ -406,6 +519,8 @@ case "$cmd" in
   env)     parse_opts "$@"; cmd_env    "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   x11)     parse_opts "$@"; cmd_x11    "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   configs) parse_opts "$@"; cmd_configs ;;
+  shell)   parse_opts "$@"; cmd_shell   "$(profile_only)" ;;
+  shim)    parse_opts "$@"; cmd_shim    "${RRV_ARGS[@]}" ;;
   rviz)    parse_opts "$@"; cmd_rviz   "$(profile_only)" "${RRV_ARGS[@]}" ;;
   run)     parse_opts "$@"; cmd_run    "$(profile_only)" "${RRV_ARGS[@]}" ;;
   remote)  parse_opts "$@"; cmd_remote "$(profile_only)" "${RRV_ARGS[@]}" ;;

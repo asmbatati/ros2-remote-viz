@@ -49,7 +49,9 @@ distro, while keeping the GPU, so you get matching ROS and local rendering.
 | `rrv build` | Build the local rviz2 image for the remote's ROS distro |
 | `rrv up` | Start whatever daemons the chosen RMW needs |
 | `rrv rviz [layout]` | Launch rviz2 here, optionally with a saved layout |
+| `rrv shell` | Interactive shell where plain `ros2 ...` hits the remote graph |
 | `rrv run CMD` | Run any ros2 command here, wired to the remote graph |
+| `rrv shim install` | Make bare `ros2` reach the remote in every shell (opt-in) |
 | `rrv remote CMD` | Run a command in the remote container with matching env |
 | `rrv x11` | Fallback: rviz2 inside the remote container, displayed here |
 | `rrv doctor` | Connectivity and configuration checks |
@@ -57,6 +59,54 @@ distro, while keeping the GPU, so you get matching ROS and local rendering.
 
 Use `-p NAME` to select a profile; `config/<NAME>.env` holds the settings, so one
 checkout can drive several robots.
+
+## Using plain `ros2` commands
+
+Three ways, least to most invasive.
+
+**One-off:**
+
+```
+rrv run ros2 topic list
+```
+
+**A shell where everything just works** — nothing outside it is affected:
+
+```
+rrv shell
+(rrv:default) $ ros2 topic list
+(rrv:default) $ ros2 topic echo /scan
+```
+
+**Globally, so bare `ros2` always reaches the robot:**
+
+```
+rrv shim install          # writes ~/.local/bin/ros2
+ros2 topic list           # now shows the remote's topics, from any shell
+rrv shim remove           # undo
+```
+
+The shim *shadows your local `ros2`* — on a machine with its own ROS install
+that affects all your local work too, so it is opt-in. Escape it per command
+without uninstalling:
+
+```
+RRV_SHIM_BYPASS=1 ros2 topic list     # runs the local ros2
+```
+
+### Custom message types
+
+`ros2 topic list` works for any topic, but `ros2 topic echo` and rviz2 need the
+message *definitions* locally to deserialise a custom type. Two options in the
+profile:
+
+```
+EXTRA_APT="ros-humble-my-robot-msgs"   # baked into the image; re-run 'rrv build'
+OVERLAY_WS=/home/me/msgs_ws            # a colcon workspace, mounted and sourced
+```
+
+The overlay must be built for **this** machine's architecture — an arm64 build
+from the robot will not load on an x86 host.
 
 ## rviz layouts
 

@@ -20,4 +20,14 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends xauth mesa-utils ${pkg}; \
     rm -rf /var/lib/apt/lists/*
 
+# Message packages for your robot's custom types. Without them "ros2 topic echo"
+# and rviz2 can list a topic but cannot deserialise it.
+ARG EXTRA_APT=""
+RUN set -eux; \
+    if [ -n "$EXTRA_APT" ]; then \
+      apt-get update; \
+      apt-get install -y --no-install-recommends $EXTRA_APT; \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
+
 ENV RMW_IMPLEMENTATION=${RMW}
