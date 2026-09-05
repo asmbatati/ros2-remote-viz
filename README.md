@@ -83,9 +83,22 @@ rrv shell
 
 ```
 rrv shim install          # writes ~/.local/bin/ros2
-ros2 topic list           # now shows the remote's topics, from any shell
+hash -r                   # in every terminal that is already open
+ros2 topic list           # now shows the remote's topics
 rrv shim remove           # undo
 ```
+
+`hash -r` matters. Bash caches the path of a command the first time it runs one,
+per shell. A terminal that ran `ros2` before the shim existed keeps calling your
+local `ros2`, which cannot see the remote graph and cannot decode its types — so
+you get tracebacks like
+
+```
+TypeError: the 'package' argument is required to perform a relative import
+```
+
+with `/opt/ros/<your-distro>/bin/ros2` in the traceback. That path is the tell:
+the shim was bypassed. `rrv doctor` checks this.
 
 The shim *shadows your local `ros2`* — on a machine with its own ROS install
 that affects all your local work too, so it is opt-in. Escape it per command
@@ -102,9 +115,18 @@ message *definitions* locally to deserialise it. `rrv msgs` works out what is
 missing and how to get it:
 
 ```
-rrv msgs          # what the graph publishes that this machine cannot decode
-rrv msgs sync     # mirror the robot-only ones into msgs/
-rrv build         # compile them into the image
+rrv msgs                # what the graph publishes that this machine cannot decode
+rrv msgs sync           # mirror the robot-only ones into msgs/
+rrv build               # compile them into the image
+```
+
+By default only topics **publishing right now** are considered. To take every
+interface package the container has — so message types from launch files that
+are not running (cameras, lidar, gimbal) are covered too:
+
+```
+rrv msgs --all          # report
+rrv msgs sync --all     # mirror everything missing, then rrv build
 ```
 
 It splits the missing packages two ways:

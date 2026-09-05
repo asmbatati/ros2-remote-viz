@@ -35,7 +35,9 @@ ${C_B}rrv${C_RST} - remote ROS 2 visualisation
   rrv up [profile]          start routers/daemons the chosen RMW needs
   rrv rviz [config]         launch rviz2 here (starts 'up' first if needed)
   rrv configs               list the .rviz layouts in rviz/
-  rrv msgs [status|sync]    find message types rviz2 is missing, and fetch them
+  rrv msgs [sync] [--all]   fetch message types this machine cannot decode
+                            (--all = everything in the container, not just
+                             what is publishing right now)
   rrv shell                 interactive shell where plain 'ros2 ...' hits the remote
   rrv run [profile] CMD...  run any ros2 command here, wired to the remote graph
   rrv shim install|remove   make bare 'ros2' reach the remote in every shell
@@ -228,6 +230,9 @@ host_daemon_pids() { pgrep -f 'ros2cli\.daemon' 2>/dev/null || true; }
 daemon_guard() {
   local pid d
   for pid in $(host_daemon_pids); do
+    # Host pgrep also sees processes inside containers, whose /proc entries are
+    # root-owned and unreadable. Those are not ours to manage: skip quietly.
+    [ -r "/proc/$pid/environ" ] || continue
     d="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^ROS_DISTRO=//p' | head -1)"
     [ -n "$d" ] || continue
     [ "$d" = "$R_DISTRO" ] && continue
@@ -453,6 +458,9 @@ SHIM
       esac
       warn "$(echo $cmds) now goes to the remote graph in every new shell.
      Undo with: rrv shim remove"
+      warn "In terminals that are ALREADY open, bash has the old path cached.
+     Run 'hash -r' in each of them (or open a new terminal), otherwise you keep
+     getting your local ros2 and errors that look like missing message types."
       ;;
     remove)
       local removed=0 f
@@ -539,8 +547,21 @@ cmd_doctor() {
   fi
   [ "$P_MODE" = docker ] && { docker image inspect "$P_IMAGE" >/dev/null 2>&1 \
     && ok "image $P_IMAGE present" || { warn "image $P_IMAGE missing - run: rrv build"; fail=1; }; }
+  local shim="${SHIM_DIR:-$HOME/.local/bin}/ros2"
+  if [ -f "$shim" ]; then
+    local resolved; resolved="$(bash -lc 'command -v ros2' 2>/dev/null | tail -1)"
+    if [ "$resolved" = "$shim" ]; then
+      ok "ros2 resolves to the rrv shim"
+    else
+      warn "a shim is installed at $shim but a login shell resolves ros2 to
+     ${resolved:-<nothing>}. Something later on PATH wins. Already-open terminals
+     also need 'hash -r'."
+      fail=1
+    fi
+  fi
   local dpid foreign=0
   for dpid in $(host_daemon_pids); do
+    [ -r "/proc/$dpid/environ" ] || continue
     local dd; dd="$(tr '\0' '\n' < "/proc/$dpid/environ" 2>/dev/null | sed -n 's/^ROS_DISTRO=//p' | head -1)"
     [ -n "$dd" ] && [ "$dd" != "$R_DISTRO" ] && foreign=1
   done

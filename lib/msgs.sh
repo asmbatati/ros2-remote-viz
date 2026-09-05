@@ -14,6 +14,20 @@ msgs_graph_packages() {
     | sed -n 's/.*\[\([a-zA-Z0-9_]*\)\/msg\/.*/\1/p' | sort -u
 }
 
+# Every interface package present in the remote container, whether or not it is
+# currently publishing. Use this to pick up message types from launch files that
+# are not running right now (cameras, lidar, gimbal, ...).
+msgs_remote_all_packages() {
+  rsh "docker exec $R_CONTAINER sh -c '
+    find / -maxdepth 9 -type d \( -name msg -o -name srv -o -name action \) 2>/dev/null |
+    while read d; do
+      pkgdir=\$(dirname \"\$d\")
+      if [ \"\$(basename \$(dirname \"\$pkgdir\"))\" = share ]; then
+        basename \"\$pkgdir\"
+      fi
+    done'" 2>/dev/null | tr -d '\r' | sort -u | grep -E '^[a-z][a-z0-9_]*$'
+}
+
 # Packages already available in the local image.
 msgs_local_packages() {
   docker run --rm "$P_IMAGE" bash -lc \
@@ -104,18 +118,33 @@ _write_pkg_files() {
 }
 
 cmd_msgs() {
-  local action="${1:-status}"; [ $# -gt 0 ] && shift
+  local action="status" all=0 a
+  for a in "$@"; do
+    case "$a" in
+      --all) all=1 ;;
+      status|sync) action="$a" ;;
+      *) die "usage: rrv msgs [status|sync] [--all]" ;;
+    esac
+  done
 
   local graph local_pkgs missing
-  step "Inspecting the ROS graph"
-  graph="$(msgs_graph_packages)"
-  [ -n "$graph" ] || die "no message types seen on the graph.
-Is the remote actually publishing? Try: rrv run ros2 topic list"
+  if [ "$all" = 1 ]; then
+    step "Scanning every interface package in $R_CONTAINER"
+    graph="$(msgs_remote_all_packages)"
+    [ -n "$graph" ] || die "found no interface packages inside $R_CONTAINER"
+    dim "  $(printf '%s\n' "$graph" | grep -c .) interface packages there"
+  else
+    step "Inspecting the ROS graph"
+    graph="$(msgs_graph_packages)"
+    [ -n "$graph" ] || die "no message types seen on the graph.
+Is the remote actually publishing? Try: rrv run ros2 topic list
+To take everything the container has instead:  rrv msgs sync --all"
+  fi
   local_pkgs="$(msgs_local_packages)"
   missing="$(comm -23 <(printf '%s\n' "$graph") <(printf '%s\n' "$local_pkgs"))"
 
   if [ -z "$missing" ]; then
-    ok "every message package on the graph is available locally"
+    ok "every message package is already available locally"
     return 0
   fi
 
@@ -136,10 +165,12 @@ Is the remote actually publishing? Try: rrv run ros2 topic list"
     echo
     [ -n "$apt_list" ] && info "Add to config/$RRV_PROFILE.env:
   EXTRA_APT=\"$(echo $apt_list)\""
-    [ -n "$src_list" ] && info "Mirror the rest with:  rrv msgs sync"
+    [ -n "$src_list" ] && info "Mirror the rest with:  rrv msgs sync$([ "$all" = 1 ] && echo ' --all')"
+    [ "$all" = 0 ] && info "
+Only topics publishing right now were considered. For message types from
+launch files that are not running (cameras, lidar, ...):  rrv msgs --all"
     return 0
   fi
-  [ "$action" = sync ] || die "usage: rrv msgs [status|sync]"
 
   # Mirror the ones apt cannot provide.
   if [ -n "$src_list" ]; then
