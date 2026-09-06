@@ -660,6 +660,31 @@ cmd_doctor() {
     ok "no conflicting ros2 CLI daemon"
   fi
   [ -n "${DISPLAY:-}" ] && ok "DISPLAY=$DISPLAY" || { warn "DISPLAY unset"; fail=1; }
+
+  # Is the remote actually running the daemon its RMW needs?
+  if [ "$P_NEEDS_ROUTER" = yes ]; then
+    if rsh "docker exec $R_CONTAINER sh -c 'ps -eo args | grep -q \"[r]mw_zenohd\"'" 2>/dev/null; then
+      ok "remote router running in $R_CONTAINER"
+    else
+      warn "no router in $R_CONTAINER - start it with: rrv up"; fail=1
+    fi
+    docker ps --format '{{.Names}}' | grep -qx rrv-router \
+      && ok "local router running" || { warn "no local router - run: rrv up"; fail=1; }
+  fi
+
+  # The layer that actually explains "rviz2 is empty": is anything publishing?
+  # /rosout and /parameter_events exist even with no nodes of your own, so a
+  # count of 2 means the robot's launch is not running.
+  local n
+  n="$("$RRV_ROOT/bin/rrv" run -p "$RRV_PROFILE" ros2 topic list 2>/dev/null | grep -c '^/' || true)"
+  if [ "${n:-0}" -le 2 ]; then
+    warn "only ${n:-0} topics on the graph - the robot is not publishing.
+     Its launch file is probably not running; rrv cannot show data that
+     nothing is sending."
+    fail=1
+  else
+    ok "$n topics on the graph"
+  fi
   echo
   [ "$fail" = 0 ] && ok "all good" || die "some checks failed"
 }
