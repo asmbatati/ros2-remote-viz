@@ -441,6 +441,51 @@ cmd_shell() {
     "$P_IMAGE" bash -lc "$(ros_setup) && exec bash --norc -i"
 }
 
+# A ROS setup.bash prepends its own bin to PATH, which lands AHEAD of the shim
+# directory in an interactive non-login shell -- the kind a terminal window
+# opens. A login shell re-prepends ~/.local/bin via ~/.profile afterwards, so
+# the shim wins there and the breakage looks random: it works when you test with
+# `bash -lc` and fails in the terminal you actually use. Re-prepend at the end
+# of ~/.bashrc, after whatever ROS sourcing it does.
+SHIM_RC_BEGIN="# >>> rrv shim >>>"
+SHIM_RC_END="# <<< rrv shim <<<"
+shim_rc_file() { echo "${SHIM_RC:-$HOME/.bashrc}"; }
+
+shim_fix_path() {
+  local dir="$1" rc; rc="$(shim_rc_file)"
+  [ -f "$rc" ] || return 0
+  if grep -qF "$SHIM_RC_BEGIN" "$rc"; then
+    ok "PATH fix already present in $rc"
+    return 0
+  fi
+  # Only needed when something later on PATH currently wins.
+  local resolved; resolved="$(bash -ic 'command -v ros2' 2>/dev/null | tail -1)"
+  if [ "$resolved" = "$dir/ros2" ]; then
+    ok "an interactive shell already resolves ros2 to the shim"
+    return 0
+  fi
+  cp "$rc" "$rc.rrv-backup.$(date +%Y%m%d%H%M%S)"
+  {
+    echo ""
+    echo "$SHIM_RC_BEGIN"
+    echo "# Keep the rrv shims ahead of a ROS install that prepends its own bin."
+    echo "# Added by 'rrv shim install'. Remove with 'rrv shim remove'."
+    echo "export PATH=\"$dir:\$PATH\""
+    echo "$SHIM_RC_END"
+  } >> "$rc"
+  ok "added a PATH fix to $rc (backup alongside it)"
+  warn "it resolved ros2 to ${resolved:-<nothing>} before this.
+     Open a new terminal, or run:  source $rc"
+}
+
+shim_unfix_path() {
+  local rc; rc="$(shim_rc_file)"
+  [ -f "$rc" ] || return 0
+  grep -qF "$SHIM_RC_BEGIN" "$rc" || return 0
+  sed -i "/^${SHIM_RC_BEGIN}\$/,/^${SHIM_RC_END}\$/d" "$rc"
+  ok "removed the PATH fix from $rc"
+}
+
 # Optional PATH shims so bare "ros2" reaches the remote graph.
 SHIM_CMDS_DEFAULT="ros2"
 
@@ -484,6 +529,7 @@ SHIM
         *":$dir:"*) ;;
         *) warn "$dir is not on your PATH - the shims will not be picked up" ;;
       esac
+      shim_fix_path "$dir"
       warn "$(echo $cmds) now goes to the remote graph in every new shell.
      Undo with: rrv shim remove"
       warn "In terminals that are ALREADY open, bash has the old path cached.
@@ -495,6 +541,7 @@ SHIM
       for f in "$dir"/*; do
         if is_shim "$f"; then rm -f "$f"; ok "removed $f"; removed=1; fi
       done
+      shim_unfix_path
       [ "$removed" = 1 ] || dim "  no rrv shims in $dir"
       ;;
     status)
@@ -589,7 +636,9 @@ cmd_doctor() {
 
   local shim="${SHIM_DIR:-$HOME/.local/bin}/ros2"
   if [ -f "$shim" ]; then
-    local resolved; resolved="$(bash -lc 'command -v ros2' 2>/dev/null | tail -1)"
+    # Check an interactive non-login shell: that is what a terminal window is,
+    # and it is where a ROS setup.bash can shadow the shim.
+    local resolved; resolved="$(bash -ic 'command -v ros2' 2>/dev/null | tail -1)"
     if [ "$resolved" = "$shim" ]; then
       ok "ros2 resolves to the rrv shim"
     else
