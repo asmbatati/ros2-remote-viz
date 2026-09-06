@@ -61,6 +61,13 @@ distro, while keeping the GPU, so you get matching ROS and local rendering.
 Use `-p NAME` to select a profile; `config/<NAME>.env` holds the settings, so one
 checkout can drive several robots.
 
+**After editing a profile, re-run `rrv detect`.** `detect` resolves the profile
+into a cached plan (which address to dial, which RMW, which container), and the
+other commands read that cache. The cache is fingerprinted against the profile
+and the machine, so a stale one is refused with the mismatch spelled out rather
+than quietly used — which previously meant a checkout pointed at a new robot
+kept talking to the old one.
+
 ## Using plain `ros2` commands
 
 Three ways, least to most invasive.

@@ -1,0 +1,224 @@
+### RViz layout for geometric_controller_test.launch.py.
+#
+# Everything the guidance + control chain publishes for the 'interceptor'
+# vehicle, in its local ENU frame. Topic names are hard coded to the
+# 'interceptor' namespace, which is what that launch file uses.
+#
+# The three heading displays are the ones worth understanding:
+#
+#   Commanded Heading (yellow)  what the planner asked for  (cmd_pose)
+#   Vehicle Heading   (blue)    where the nose actually is  (odom_pose)
+#   Actual Trail      (red)     where it has been, one arrow per sample
+#
+# Yellow and blue on top of each other means yaw is tracking. A persistent
+# gap between them is a yaw tracking problem; a yellow arrow that does not
+# sweep with the shape is a yaw *reference* problem (check 'yaw_mode' and
+# the 'max_yaw_rate' warning the planner logs at startup).
+#
+# In yaw_mode 2 (VELOCITY_ALIGNED) the heading arrows also show the direction
+# of motion, because that mode points the nose along the velocity. In the
+# other yaw modes heading and direction of travel are deliberately different,
+# so read the arrows as heading only.
+#
+# QoS matters here: geometric_controller/odom is published Best Effort and
+# the reference path is Transient Local. Those are set per display below --
+# changing them to Reliable/Volatile in the GUI makes the display go blank.
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 70
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Reference Path1
+        - /Actual Trail1
+        - /Commanded Heading1
+        - /Vehicle Heading1
+      Splitter Ratio: 0.55
+    Tree Height: 640
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 40
+      Color: 160; 160; 164
+      Alpha: 0.3
+      Reference Frame: interceptor/odom
+
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Show Names: true
+      Show Axes: true
+      Show Arrows: false
+      Marker Scale: 1
+
+    # The shape the planner intends to fly, republished at path_rate (1 Hz by
+    # default) over path_preview_horizon seconds. Transient Local, so it is
+    # still drawn when RViz connects after the planner has already started.
+    - Class: rviz_default_plugins/Path
+      Name: Reference Path
+      Enabled: true
+      Topic:
+        Value: /interceptor/trajectory_publisher/trajectory
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Color: 25; 255; 25
+      Alpha: 1
+      Line Style: Billboards
+      Line Width: 0.04
+      Buffer Length: 1
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Style: None
+
+    # Where the vehicle has actually been. Keep: 600 at ~30 Hz of display
+    # updates is roughly the last 20 s of flight; raise it to hold a whole
+    # lap of a slow shape, lower it if the view gets cluttered.
+    # Published Best Effort (SensorDataQoS) by geometric_mavros_node.
+    - Class: rviz_default_plugins/Odometry
+      Name: Actual Trail
+      Enabled: true
+      Topic:
+        Value: /interceptor/geometric_controller/odom
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+      Keep: 600
+      Position Tolerance: 0.05
+      Angle Tolerance: 0.05
+      Covariance:
+        Value: false
+      Shape:
+        Value: Arrow
+        Color: 255; 45; 45
+        Alpha: 1
+        Shaft Length: 0.18
+        Shaft Radius: 0.02
+        Head Length: 0.08
+        Head Radius: 0.05
+
+    # What the controller is commanding: position is the active setpoint,
+    # orientation is the full attitude it wants, so the arrow is the
+    # commanded heading.
+    - Class: rviz_default_plugins/Pose
+      Name: Commanded Heading
+      Enabled: true
+      Topic:
+        Value: /interceptor/geometric_controller/cmd_pose
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Shape: Arrow
+      Color: 255; 220; 40
+      Alpha: 1
+      Shaft Length: 0.9
+      Shaft Radius: 0.05
+      Head Length: 0.3
+      Head Radius: 0.11
+
+    # Where the nose actually points, from the same estimate the controller
+    # closes the loop on.
+    - Class: rviz_default_plugins/Pose
+      Name: Vehicle Heading
+      Enabled: true
+      Topic:
+        Value: /interceptor/geometric_controller/odom_pose
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Shape: Arrow
+      Color: 70; 150; 255
+      Alpha: 1
+      Shaft Length: 0.9
+      Shaft Radius: 0.05
+      Head Length: 0.3
+      Head Radius: 0.11
+
+    # Body axes rather than a single arrow: useful when roll/pitch matter,
+    # e.g. checking how hard it is banking through a fast shape.
+    - Class: rviz_default_plugins/Pose
+      Name: Vehicle Axes
+      Enabled: false
+      Topic:
+        Value: /interceptor/geometric_controller/odom_pose
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Shape: Axes
+      Axes Length: 0.7
+      Axes Radius: 0.06
+
+    # Straight from MAVROS, bypassing the controller's own republish. Handy
+    # when you suspect the controller is looking at a different estimate
+    # than PX4 is flying on. Best Effort, like everything MAVROS publishes.
+    - Class: rviz_default_plugins/Pose
+      Name: MAVROS Pose
+      Enabled: false
+      Topic:
+        Value: /interceptor/mavros/local_position/pose
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+      Shape: Axes
+      Axes Length: 0.5
+      Axes Radius: 0.04
+
+    # Only populated when trajectory_type is 3 (POLYNOMIAL); the planner
+    # publishes one path per primitive and motion_selector picks the active
+    # one. Left off so it does not sit empty for the shape trajectories.
+    - Class: rviz_default_plugins/Path
+      Name: Primitive 0
+      Enabled: false
+      Topic:
+        Value: /interceptor/trajectory_publisher/primitive_0
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Color: 200; 200; 200
+      Line Style: Billboards
+      Line Width: 0.02
+      Buffer Length: 1
+
+  Global Options:
+    Background Color: 42; 42; 48
+    Fixed Frame: interceptor/odom
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Select
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Orbit
+      Distance: 16
+      Pitch: 0.75
+      Yaw: 0.85
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 2
+    Saved: ~
+Window Geometry:
+  Height: 900
+  Width: 1500
+  Displays:
+    collapsed: false
+  Views:
+    collapsed: false

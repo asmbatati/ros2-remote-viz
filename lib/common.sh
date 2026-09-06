@@ -72,15 +72,39 @@ Set it up once with:  ssh-copy-id $REMOTE_SSH
 
 # --- cache ------------------------------------------------------------------
 cache_file() { echo "$RRV_CACHE/$RRV_PROFILE.env"; }
+
+# The cache holds values derived from the profile at detect time (P_XHOST, the
+# chosen RMW, the container name). It is sourced after the profile, so it wins.
+# Without this fingerprint, editing the profile -- pointing it at a different
+# robot, say -- changed nothing until someone remembered to re-run detect, and
+# rrv silently kept talking to the old address.
+# The hostname is included because the cache also records facts about THIS
+# machine (its address on the route to the robot, its GPU, its image). Copying
+# a checkout to another machine must not reuse them.
+profile_fingerprint() {
+  printf '%s\n' "$REMOTE_SSH" "$REMOTE_CONTAINER" "$RMW" "$ROS_DOMAIN_ID" \
+                 "$TRANSPORT_HOST" "$EXTRA_APT" "$OVERLAY_WS" "$(hostname)" \
+    | sha256sum | cut -d" " -f1
+}
+
 cache_load() {
   local f; f="$(cache_file)"
   [ -f "$f" ] || die "no detection cache for '$RRV_PROFILE'. Run: rrv detect $RRV_PROFILE"
+  local want; want="$(profile_fingerprint)"
+  local ssh_before="$REMOTE_SSH"
   # shellcheck disable=SC1090
   set -a; . "$f"; set +a
+  if [ "${RRV_FINGERPRINT:-}" != "$want" ]; then
+    die "the cached plan does not match this profile or this machine.
+Cached: ${P_XHOST:-<unknown>} (container '${R_CONTAINER:-?}')
+Now:    $ssh_before  on $(hostname)
+Re-run:  rrv detect $RRV_PROFILE"
+  fi
 }
 cache_save() {
   local f; f="$(cache_file)"; mkdir -p "$(dirname "$f")"
   : > "$f"
+  printf 'RRV_FINGERPRINT=%s\n' "$(profile_fingerprint)" >> "$f"
   local kv
   for kv in "$@"; do printf '%s\n' "$kv" >> "$f"; done
 }
