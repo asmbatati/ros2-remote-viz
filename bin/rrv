@@ -315,14 +315,18 @@ cmd_up() {
 # list" shows almost nothing while the data is really flowing. Dropping it here
 # costs one restart and only at the moment the topology changes.
 daemon_flush() {
-  if rsh "docker exec $R_CONTAINER pgrep -f ros2cli.daemon >/dev/null 2>&1"; then
-    rsh "docker exec $R_CONTAINER pkill -f ros2cli.daemon" >/dev/null 2>&1 || true
+  # SIGTERM is not enough: a daemon whose rclpy context has died (it answers
+  # every call with Fault 1 "!rclpy.ok()") ignores it and keeps serving faults.
+  # Ask it to stop properly, then SIGKILL whatever is left.
+  if rsh "docker exec $R_CONTAINER sh -c 'ps -eo args | grep -q \"[r]os2cli.daemon\"'" 2>/dev/null; then
+    rsh "docker exec $R_CONTAINER bash -lc 'source /opt/ros/$R_DISTRO/setup.bash && timeout 10 ros2 daemon stop'" >/dev/null 2>&1 || true
+    rsh "docker exec $R_CONTAINER sh -c 'for p in \$(ps -eo pid,args | grep \"[r]os2cli.daemon\" | awk \"{print \\\$1}\"); do kill -9 \$p; done'" >/dev/null 2>&1 || true
     dim "  cleared the cached ros2 graph in $R_CONTAINER"
   fi
   local pid
   for pid in $(host_daemon_pids); do
     [ -r "/proc/$pid/environ" ] || continue
-    kill "$pid" 2>/dev/null || true
+    kill -9 "$pid" 2>/dev/null || true
   done
   return 0
 }
@@ -571,6 +575,18 @@ cmd_doctor() {
   fi
   [ "$P_MODE" = docker ] && { docker image inspect "$P_IMAGE" >/dev/null 2>&1 \
     && ok "image $P_IMAGE present" || { warn "image $P_IMAGE missing - run: rrv build"; fail=1; }; }
+  # A daemon whose rclpy context has died keeps answering, with
+  # Fault 1 "!rclpy.ok()", so every ros2 command in the container fails.
+  local rout
+  rout="$(rsh "docker exec $R_CONTAINER bash -lc 'source /opt/ros/$R_DISTRO/setup.bash && timeout 25 ros2 topic list 2>&1 | tail -3'" 2>&1 || true)"
+  if printf '%s' "$rout" | grep -q 'rclpy.ok\|xmlrpc'; then
+    warn "the ros2 CLI in $R_CONTAINER is wedged on a dead daemon.
+     Clear it with: rrv up   (or inside the container: ros2 daemon stop)"
+    fail=1
+  else
+    ok "ros2 CLI healthy inside $R_CONTAINER"
+  fi
+
   local shim="${SHIM_DIR:-$HOME/.local/bin}/ros2"
   if [ -f "$shim" ]; then
     local resolved; resolved="$(bash -lc 'command -v ros2' 2>/dev/null | tail -1)"
