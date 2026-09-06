@@ -1,0 +1,5 @@
+# mode: 0=lock, 1=follow, 2=fpv
+uint8 mode
+---
+bool success
+string message

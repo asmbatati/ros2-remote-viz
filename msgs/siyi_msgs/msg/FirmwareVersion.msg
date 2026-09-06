@@ -1,0 +1,3 @@
+string camera_version
+string gimbal_version
+string zoom_version

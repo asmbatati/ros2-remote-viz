@@ -1,0 +1,6 @@
+# speed range: -100 to 100 (0 = stop)
+int32 yaw_speed
+int32 pitch_speed
+---
+bool success
+string message

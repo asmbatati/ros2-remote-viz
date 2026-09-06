@@ -115,16 +115,18 @@ RRV_P=""            # profile from -p, empty means 'default'
 RRV_ARGS=()
 parse_opts() {
   RRV_ARGS=()
+  local -a pass=()   # options handled by the command itself, kept in order
   while [ $# -gt 0 ]; do
     case "$1" in
       -p|--profile) [ $# -ge 2 ] || die "-p needs a profile name"; RRV_P="$2"; shift 2 ;;
       -p=*|--profile=*) RRV_P="${1#*=}"; shift ;;
+      --all) pass+=("$1"); shift ;;
       --) shift; break ;;
       -*) die "unknown option: $1" ;;
       *) break ;;
     esac
   done
-  RRV_ARGS=("$@")
+  RRV_ARGS=("${pass[@]}" "$@")
 }
 # Commands taking no positional args accept a bare profile name for convenience.
 profile_or_arg() { if [ -n "$RRV_P" ]; then echo "$RRV_P"; else echo "${1:-default}"; fi; }
@@ -226,7 +228,11 @@ build_mount_args() {
 #   ResponseError: unknown tag 'rclpy.type_hash.TypeHash'
 # Topic listing still works, which makes it look like a message-definition
 # problem rather than a daemon one.
-host_daemon_pids() { pgrep -f 'ros2cli\.daemon' 2>/dev/null || true; }
+# Exclude our own process and parent: a shell whose command line merely mentions
+# the pattern would otherwise match, and get killed.
+host_daemon_pids() {
+  pgrep -f 'ros2cli\.daemon' 2>/dev/null | grep -vx "$$" | grep -vx "${PPID:-0}" || true
+}
 daemon_guard() {
   local pid d
   for pid in $(host_daemon_pids); do
@@ -301,6 +307,24 @@ cmd_up() {
     docker ps --format '{{.Names}}' | grep -qx rrv-router \
       && ok "local router up" || die "local router failed - check: docker logs rrv-router"
   fi
+  daemon_flush
+}
+
+# The ros2 CLI daemon caches the graph. One started before the routers or the
+# robot's nodes can serve that empty snapshot for a long time, so "ros2 topic
+# list" shows almost nothing while the data is really flowing. Dropping it here
+# costs one restart and only at the moment the topology changes.
+daemon_flush() {
+  if rsh "docker exec $R_CONTAINER pgrep -f ros2cli.daemon >/dev/null 2>&1"; then
+    rsh "docker exec $R_CONTAINER pkill -f ros2cli.daemon" >/dev/null 2>&1 || true
+    dim "  cleared the cached ros2 graph in $R_CONTAINER"
+  fi
+  local pid
+  for pid in $(host_daemon_pids); do
+    [ -r "/proc/$pid/environ" ] || continue
+    kill "$pid" 2>/dev/null || true
+  done
+  return 0
 }
 
 cmd_rviz() {

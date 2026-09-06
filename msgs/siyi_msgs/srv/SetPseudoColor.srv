@@ -1,0 +1,6 @@
+# color_mode: 0=white_hot, 1=black_hot, 2=fusion, 3=rainbow, 4=ironbow
+uint8 color_mode
+---
+bool success
+string message
+uint8 actual_color_mode

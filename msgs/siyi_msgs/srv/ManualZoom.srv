@@ -1,0 +1,6 @@
+# direction: 1=zoom_in, -1=zoom_out, 0=stop
+int32 direction
+---
+bool success
+string message
+float32 current_zoom

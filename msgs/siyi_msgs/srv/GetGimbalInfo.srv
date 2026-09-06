@@ -1,0 +1,4 @@
+---
+bool success
+string message
+siyi_msgs/GimbalInfo info

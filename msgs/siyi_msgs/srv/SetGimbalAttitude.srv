@@ -1,0 +1,8 @@
+float32 yaw_deg
+float32 pitch_deg
+---
+bool success
+string message
+float32 actual_yaw_deg
+float32 actual_pitch_deg
+float32 actual_roll_deg

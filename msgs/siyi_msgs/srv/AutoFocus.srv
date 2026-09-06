@@ -1,0 +1,6 @@
+# touch position as screen percentage 0-100
+float32 touch_x
+float32 touch_y
+---
+bool success
+string message

@@ -1,0 +1,5 @@
+float32 zoom_level
+---
+bool success
+string message
+float32 actual_zoom

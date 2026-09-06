@@ -1,0 +1,5 @@
+# direction: 1=focus_in, -1=focus_out, 0=stop
+int32 direction
+---
+bool success
+string message
