@@ -23,6 +23,7 @@ export RRV_ROOT
 . "$RRV_ROOT/lib/rmw/load.sh"
 . "$RRV_ROOT/lib/msgs.sh"
 . "$RRV_ROOT/lib/pkgs.sh"
+. "$RRV_ROOT/lib/here.sh"
 
 usage() {
   cat <<USAGE
@@ -43,11 +44,14 @@ ${C_B}rrv${C_RST} - remote ROS 2 visualisation
                             their panels and displays load in rviz2
   rrv shell                 interactive shell where plain 'ros2 ...' hits the remote
   rrv run [profile] CMD...  run any ros2 command here, wired to the remote graph
+  rrv here install|remove   launch from a shell inside the robot's container:
+                            'rviz-here <layout>' opens it on this screen
   rrv shim install|remove   make bare 'ros2' reach the remote in every shell
   rrv remote [profile] CMD  run a command in the remote container with matching env
   rrv x11 [profile]         fallback: rviz2 inside the remote container, shown here
   rrv doctor [profile]      connectivity and configuration checks
-  rrv down [profile]        stop everything rrv started
+  rrv down [profile]        stop what rrv started here (--remote: the robot's
+                            router too, which orphans its running nodes)
   rrv env [profile]         print the env a node needs, for sourcing
 
 Add -p NAME to use a different profile (config/<NAME>.env); default is 'default'.
@@ -134,7 +138,7 @@ parse_opts() {
     case "$1" in
       -p|--profile) [ $# -ge 2 ] || die "-p needs a profile name"; RRV_P="$2"; shift 2 ;;
       -p=*|--profile=*) RRV_P="${1#*=}"; shift ;;
-      --all) pass+=("$1"); shift ;;
+      --all|--remote) pass+=("$1"); shift ;;
       --) shift; break ;;
       -*) die "unknown option: $1" ;;
       *) break ;;
@@ -360,6 +364,7 @@ cmd_up() {
       && ok "local router up" || die "local router failed - check: docker logs rrv-router"
   fi
   daemon_flush
+  here_up
 }
 
 # The ros2 CLI daemon caches the graph. One started before the routers or the
@@ -405,7 +410,7 @@ cmd_rviz() {
   # panels read the same namespace to find the nodes they drive.
   # RVIZ_NS in the profile wins over what detect found; set it to "/" to stay
   # at the root.
-  local ns="${RVIZ_NS:-${R_NS:-}}"
+  local ns="${RRV_NS_OVERRIDE:-${RVIZ_NS:-${R_NS:-}}}"
   local -a nsargs=()
   if [ -n "$ns" ] && [ "$ns" != "/" ]; then
     nsargs=(--ros-args -r "__ns:=$ns")
@@ -662,13 +667,34 @@ cmd_x11() {
 }
 
 cmd_down() {
-  need_detect "${1:-default}"
+  local remote=0 a
+  local -a args=()
+  for a in "$@"; do
+    case "$a" in
+      --remote) remote=1 ;;
+      *) args+=("$a") ;;
+    esac
+  done
+  need_detect "$(profile_or_arg "${args[0]:-}")"
   step "Stopping"
   docker rm -f rrv-rviz rrv-router >/dev/null 2>&1 && ok "local containers stopped" || dim "  no local containers"
-  if [ "$P_NEEDS_ROUTER" = yes ]; then
-    rsh "docker exec $R_CONTAINER pkill -f rmw_zenohd" >/dev/null 2>&1 \
-      && ok "remote router stopped" || dim "  no remote router"
+  here_down
+  if [ "$P_NEEDS_ROUTER" != yes ]; then
+    return 0
   fi
+  # The remote router is left alone by default. Nodes already running on the
+  # robot registered with it at start-up and do NOT re-register when a new one
+  # replaces them: killing it leaves the launch running but invisible on the
+  # graph, which reads exactly like rrv having broken the robot.
+  if [ "$remote" = 0 ]; then
+    dim "  left the router in $R_CONTAINER running (--remote stops it, but see below)"
+    return 0
+  fi
+  warn "stopping the router in $R_CONTAINER.
+     Anything already running on the robot will drop off the graph and stay
+     off it: restart the robot's launch file afterwards."
+  rsh "docker exec $R_CONTAINER pkill -f rmw_zenohd" >/dev/null 2>&1 \
+    && ok "remote router stopped" || dim "  no remote router"
 }
 
 cmd_doctor() {
@@ -747,6 +773,18 @@ cmd_doctor() {
   fi
   [ -n "${DISPLAY:-}" ] && ok "DISPLAY=$DISPLAY" || { warn "DISPLAY unset"; fail=1; }
 
+  # The launch-from-robot link, when its container side is installed. Both legs
+  # ride one ssh connection, and a dropped one looks like "rviz-here does
+  # nothing" from the robot, where there is no way to see why.
+  if here_container_installed; then
+    here_listener_pid >/dev/null \
+      && ok "request listener running (port $(here_ctl_port))" \
+      || { warn "container side installed but no request listener - run: rrv up"; fail=1; }
+    here_tunnel_pid >/dev/null \
+      && ok "reverse tunnel to $REMOTE_SSH running" \
+      || { warn "container side installed but no reverse tunnel - run: rrv up"; fail=1; }
+  fi
+
   # Is the remote actually running the daemon its RMW needs?
   if [ "$P_NEEDS_ROUTER" = yes ]; then
     if rsh "docker exec $R_CONTAINER sh -c 'ps -eo args | grep -q \"[r]mw_zenohd\"'" 2>/dev/null; then
@@ -783,13 +821,14 @@ case "$cmd" in
   plan)    parse_opts "$@"; cmd_plan   "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   build)   parse_opts "$@"; cmd_build  "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   up)      parse_opts "$@"; cmd_up     "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
-  down)    parse_opts "$@"; cmd_down   "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
+  down)    parse_opts "$@"; cmd_down   "${RRV_ARGS[@]}" ;;
   doctor)  parse_opts "$@"; cmd_doctor "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   env)     parse_opts "$@"; cmd_env    "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   x11)     parse_opts "$@"; cmd_x11    "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   configs) parse_opts "$@"; cmd_configs ;;
   msgs)    parse_opts "$@"; need_detect "$(profile_only)"; cmd_msgs "${RRV_ARGS[@]}" ;;
   pkgs)    parse_opts "$@"; need_detect "$(profile_only)"; cmd_pkgs "${RRV_ARGS[@]}" ;;
+  here)    parse_opts "$@"; need_detect "$(profile_only)"; cmd_here "${RRV_ARGS[@]}" ;;
   shell)   parse_opts "$@"; cmd_shell   "$(profile_only)" ;;
   shim)    parse_opts "$@"; cmd_shim    "${RRV_ARGS[@]}" ;;
   rviz)    parse_opts "$@"; cmd_rviz   "$(profile_only)" "${RRV_ARGS[@]}" ;;

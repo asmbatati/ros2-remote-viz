@@ -54,6 +54,36 @@ also the reason the version check works at all — worth keeping if you want
 Nothing else was written this round: staging the packages copies files *out* of
 the container with `tar`, and reads nothing else.
 
+## 2c. `rrv here install` inside `ihunter` (2026-09-07, opt-in)
+
+This one is **not** passive: you asked for the launch-from-robot link, and it
+writes inside the container. Everything it writes is listed here, and
+`rrv here remove` takes all of it back out.
+
+| Path | What it is |
+|---|---|
+| `/usr/local/bin/rviz-here` | The wrapper you type in the container. Opens a TCP connection to the reverse tunnel and holds it. |
+| `/root/.rrv-here.sh` | Sets `DISPLAY=localhost:10.0`, `XAUTHORITY`, `LIBGL_ALWAYS_SOFTWARE=1`, `QT_X11_NO_MITSHM=1`. |
+| `/root/.bashrc` | Three lines between `# >>> rrv here >>>` markers, sourcing the file above. |
+| `/tmp/.rrv.xauth` | The X cookie, refreshed by every `rrv up`. Cleared on container restart. |
+
+Nothing else changed: no packages, no `apt`, no `sudo`, no ROS files touched.
+`/opt/ros` is exactly as it was — the wrapper is a separate command, not a
+replacement for `rviz2`.
+
+**To undo:**
+
+    rrv here remove
+
+which is equivalent to:
+
+    ssh nvidia@192.168.1.118 'docker exec ihunter sh -c "
+      rm -f /usr/local/bin/rviz-here /root/.rrv-here.sh /tmp/.rrv.xauth
+      sed -i \"/^# >>> rrv here >>>$/,/^# <<< rrv here <<<$/d\" /root/.bashrc"'
+
+On the operator's machine it also leaves an ssh process holding the reverse
+tunnel and a `rrv-listen` process; `rrv down` stops both.
+
 ## 3. Processes
 
 A Zenoh router (`rmw_zenohd`) is **currently running inside `ihunter`**, started

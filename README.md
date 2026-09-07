@@ -53,11 +53,14 @@ distro, while keeping the GPU, so you get matching ROS and local rendering.
 | `rrv rviz [layout]` | Launch rviz2 here, optionally with a saved layout |
 | `rrv shell` | Interactive shell where plain `ros2 ...` hits the remote graph |
 | `rrv run CMD` | Run any ros2 command here, wired to the remote graph |
+| `rrv here install` | Let a shell **inside the robot** open rviz2 on this screen (opt-in) |
 | `rrv shim install` | Make bare `ros2` reach the remote in every shell (opt-in) |
 | `rrv remote CMD` | Run a command in the remote container with matching env |
 | `rrv x11` | Fallback: rviz2 inside the remote container, displayed here |
 | `rrv doctor` | Connectivity and configuration checks |
-| `rrv down` | Stop everything rrv started |
+| `rrv down` | Stop what rrv started on this machine. The robot's router is left
+running: nodes already up there registered with it and do not re-register, so
+killing it would leave the launch running but invisible. `--remote` stops it anyway. |
 
 Use `-p NAME` to select a profile; `config/<NAME>.env` holds the settings, so one
 checkout can drive several robots.
@@ -236,6 +239,76 @@ panels, and those are openable by name too — `rrv configs` lists them under
 *Shipped by staged packages*. `rviz/` is searched first, so a copy there
 overrides the package's original; `rrv configs` marks which ones are shadowed,
 since editing a copy that nothing opens is an easy afternoon to lose.
+
+## Launching from the robot
+
+Normally you sit on this machine and run `rrv rviz`. If you would rather stay in
+the shell you already have open inside the robot's container, `rrv here install`
+puts two files there and `rrv up` maintains one reverse-tunnelled ssh connection
+carrying both directions:
+
+```
+rrv here install        # writes the container side (opt-in; see below)
+rrv up                  # opens the tunnel and starts the listener
+```
+
+Then, in a **new** shell inside the container:
+
+```
+rviz-here geo_field     # rviz2 runs HERE, on this machine's GPU
+rviz2                   # rviz2 runs THERE, drawn here over X11
+```
+
+### `rviz-here` — the fast path
+
+The robot sends a request; rviz2 starts on this machine exactly as `rrv rviz`
+would, with the same layout resolution and the same namespace. Progress is
+streamed back, so the robot's terminal shows which layout and namespace were
+used, and **closing the connection closes the window** — Ctrl-C there, or the
+launch file exiting, takes the window down here.
+
+Layout names resolve **on this machine first**, so `rviz-here geo_field` gets
+your `rviz/geo_field.rviz` with its fixes rather than the robot's original. An
+absolute path that only exists on the robot is copied across instead:
+
+```
+rviz-here                                  your default layout
+rviz-here navigator                        by name, resolved here
+rviz-here /root/ws/install/x/share/y.rviz  copied out of the container
+rviz-here --ns /other_vehicle navigator    override the namespace
+```
+
+### `rviz2` — the X11 path
+
+`rrv here install` also points `DISPLAY` inside the container at this screen, so
+an **unmodified** `rviz2` or `ros2 launch` draws here with nothing knowing about
+rrv. That is the whole appeal, and it is also slow: a remote X display gets no
+direct rendering, so Mesa falls back to its software rasteriser on the Jetson's
+CPU and ships whole frames over the network. Measured on this setup, showing
+nothing but a grid: **11 fps, against 31 fps for `rviz-here`**. Use it for a
+quick look; use `rviz-here` for anything with a camera or a lidar in it.
+
+Only interactive shells pick `DISPLAY` up — that is `/root/.bashrc`'s own
+`[ -z "$PS1" ] && return`, not rrv — so start a new shell after `rrv up`, or
+`source /root/.rrv-here.sh`.
+
+### What it puts in the container
+
+Opt-in, because it writes inside the container:
+
+| Path | What |
+|---|---|
+| `/usr/local/bin/rviz-here` | The wrapper you type |
+| `/root/.rrv-here.sh` | `DISPLAY`, `XAUTHORITY`, and two X/GL settings a tunnel needs |
+| `/root/.bashrc` | Three marked lines sourcing that file |
+| `/tmp/.rrv.xauth` | The X cookie, refreshed by every `rrv up` |
+
+`rrv here remove` takes all four back out. `rrv up` restores anything a
+recreated container lost, so `jetson-containers run` does not quietly break the
+link. `rrv here status` and `rrv doctor` both report which legs are up.
+
+Nothing reaches the listener except through the tunnel, and what arrives is
+passed to `rrv here open` as an argument list — never to a shell.
 
 ## RMW support
 

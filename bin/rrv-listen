@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Open rviz2 on this machine when the robot asks for it.
+
+Started by `rrv up` and reachable only through the reverse SSH tunnel that the
+same command maintains, so the one way to reach this socket is an authenticated
+ssh session to the robot.
+
+A request is a tab-separated argument list for `rrv here open`, and it is passed
+to that command as a list -- never through a shell. Everything arriving here
+comes from the far end of a tunnel, so it is treated as arguments and nothing
+more.
+
+The connection stays open for as long as the caller wants the window: when it
+drops, the rviz2 started for it is terminated. That is what makes Ctrl-C on the
+robot's launch file close the window on this desk. Output is streamed back, so
+the robot-side terminal shows which layout and namespace were used.
+"""
+
+import os
+import selectors
+import signal
+import socket
+import socketserver
+import subprocess
+import sys
+import threading
+
+RRV = os.environ.get("RRV_BIN") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "rrv")
+PROFILE = os.environ.get("RRV_PROFILE", "default")
+
+# rrv rviz runs the container as --name rrv-rviz, so there is one window by
+# construction. Track it here too: a second request replaces the first rather
+# than racing it for the name.
+_current = None
+_lock = threading.Lock()
+
+
+def _stop_current():
+    global _current
+    with _lock:
+        child = _current
+        _current = None
+    if child and child.poll() is None:
+        child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self):
+        global _current
+        sock = self.request
+        sock.settimeout(30)
+        try:
+            line = b""
+            while not line.endswith(b"\n") and len(line) < 8192:
+                chunk = sock.recv(1024)
+                if not chunk:
+                    break
+                line += chunk
+        except (socket.timeout, OSError):
+            return
+        sock.settimeout(None)
+
+        if not line:
+            return  # a connection that said nothing: not a request
+        args = [a for a in line.decode("utf-8", "replace").strip().split("\t") if a]
+
+        _stop_current()
+
+        # -p has to come after the subcommand: rrv parses options per command,
+        # so "here open -p X" would read X as the layout name.
+        cmd = [RRV, "here", "-p", PROFILE, "open"] + args
+        try:
+            child = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, start_new_session=True)
+        except OSError as exc:
+            try:
+                sock.sendall(("rrv: cannot run %s: %s\n" % (RRV, exc)).encode())
+            except OSError:
+                pass
+            return
+        with _lock:
+            _current = child
+
+        # Pump the command's output back to the robot's terminal.
+        def pump():
+            try:
+                for out in iter(child.stdout.readline, b""):
+                    try:
+                        sock.sendall(out)
+                    except OSError:
+                        break
+            finally:
+                try:
+                    child.stdout.close()
+                except OSError:
+                    pass
+
+        t = threading.Thread(target=pump, daemon=True)
+        t.start()
+
+        # Wait for whichever ends first: the window closing here, or the caller
+        # letting go there.
+        sel = selectors.DefaultSelector()
+        sel.register(sock, selectors.EVENT_READ)
+        try:
+            while child.poll() is None:
+                for key, _ in sel.select(timeout=1.0):
+                    del key
+                    try:
+                        if not sock.recv(4096):
+                            raise ConnectionResetError
+                    except OSError:
+                        return  # caller went away; finally: clause stops rviz2
+        finally:
+            sel.close()
+            with _lock:
+                mine = _current is child
+            if mine:
+                _stop_current()
+
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 7910
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: (_stop_current(), sys.exit(0)))
+    with Server(("127.0.0.1", port), Handler) as srv:
+        srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
