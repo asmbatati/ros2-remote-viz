@@ -47,4 +47,30 @@ RUN set -ex; \
     fi; \
     rm -rf /tmp/msgs_ws
 
+# Packages built from source, staged by "rrv pkgs sync". An rviz plugin is
+# compiled code that rviz2 dlopen()s, so a package shipping panels or displays
+# has to be built for THIS architecture -- the robot's aarch64 build cannot be
+# copied to an x86 laptop. Empty unless you have staged something.
+#
+# PKG_APT is resolved on the host from these packages' own package.xml files;
+# the fixed list beside it is the toolchain any rviz plugin needs (Qt5 with its
+# moc, and the two headers ROS packages most often reach for outside ROS).
+ARG PKG_APT=""
+COPY pkgs/ /tmp/pkgs_ws/src/
+RUN set -ex; \
+    if [ -n "$(find /tmp/pkgs_ws/src -mindepth 1 -maxdepth 1 -type d 2>/dev/null)" ]; then \
+      apt-get update; \
+      apt-get install -y --no-install-recommends \
+        python3-colcon-common-extensions \
+        qtbase5-dev qtbase5-dev-tools libqt5svg5-dev \
+        libeigen3-dev libyaml-cpp-dev ${PKG_APT}; \
+      . /opt/ros/${ROS_DISTRO}/setup.sh; \
+      if [ -f /opt/rrv_msgs/setup.sh ]; then . /opt/rrv_msgs/setup.sh; fi; \
+      cd /tmp/pkgs_ws; \
+      colcon build --merge-install --install-base /opt/rrv_pkgs \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF; \
+      rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    rm -rf /tmp/pkgs_ws
+
 ENV RMW_IMPLEMENTATION=${RMW}

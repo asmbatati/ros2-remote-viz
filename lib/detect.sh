@@ -59,6 +59,34 @@ Set REMOTE_CONTAINER in config/$RRV_PROFILE.env to the one you want." ;;
   esac
 }
 
+# The namespace the robot's own topics live under.
+#
+# rviz plugin packages ship layouts that name topics RELATIVELY -- their launch
+# files put rviz2 in the vehicle's namespace and let ROS resolve them. Launch
+# the same layout at the root and every display silently subscribes to a topic
+# that does not exist. The panels read the same namespace to find their nodes.
+#
+# Taken as the first path segment that most namespaced topics share. Not all
+# of them: a vehicle namespace always sits alongside a handful of strays --
+# a node publishing its own status at the root, mavros's /uasN -- and demanding
+# unanimity finds nothing on a perfectly ordinary robot.
+_detect_namespace() {
+  local topics
+  topics=$(rsh "docker exec $R_CONTAINER bash -lc \
+    'source /opt/ros/$R_DISTRO/setup.bash >/dev/null 2>&1; ros2 topic list 2>/dev/null'" \
+    2>/dev/null | tr -d '\r' | grep -E '^/[^/]+/')
+  [ -n "$topics" ] || return 0
+  local total; total=$(printf '%s\n' "$topics" | grep -c .)
+  [ "$total" -ge 5 ] || return 0
+  local top n ns
+  top=$(printf '%s\n' "$topics" | sed 's:^/\([^/]*\)/.*:\1:' | sort | uniq -c | sort -rn | head -1)
+  n=$(printf '%s' "$top" | awk '{print $1}')
+  ns=$(printf '%s' "$top" | awk '{print $2}')
+  # A clear majority, or it is not a namespace -- just the busiest node.
+  [ $((n * 100 / total)) -ge 60 ] || return 0
+  printf '/%s\n' "$ns"
+}
+
 detect_remote() {
   step "Remote: $REMOTE_SSH"
   rsh_check
@@ -88,12 +116,15 @@ detect_remote() {
   R_HAS_RVIZ=no
   rsh "docker exec $R_CONTAINER test -x /opt/ros/$R_DISTRO/bin/rviz2" 2>/dev/null && R_HAS_RVIZ=yes
 
+  R_NS="$(_detect_namespace)"
+
   dim "  os          $R_OS ($R_ARCH)${R_JETPACK:+ | $R_JETPACK}"
   dim "  container   $R_CONTAINER  [network: $R_NETMODE]"
   dim "  ros distro  $R_DISTRO"
   dim "  rmw avail   ${R_RMWS:-<none>}"
   dim "  rmw current ${R_RMW_CUR:-<unset>}"
   dim "  rviz2       $R_HAS_RVIZ"
+  dim "  namespace   ${R_NS:-<none - robot not publishing, or topics are at the root>}"
   [ "$R_IPV6" = 1 ] && dim "  ipv6        disabled (routers must bind 0.0.0.0)"
   [ "$R_NETMODE" = host ] || warn "container network is '$R_NETMODE', not 'host'.
      Cross-machine ROS traffic will not reach it. Restart it with --network host."

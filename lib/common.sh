@@ -40,7 +40,10 @@ Run: rrv init $profile"
   : "${TRANSPORT_HOST:=${REMOTE_SSH#*@}}"
   : "${EXTRA_APT:=}"
   : "${OVERLAY_WS:=}"
-  export RRV_PROFILE RMW REMOTE_CONTAINER ROS_DOMAIN_ID TRANSPORT_HOST EXTRA_APT OVERLAY_WS
+  # Namespace to run rviz2 in. Empty means "use what detect found on the
+  # robot"; "/" pins it to the root.
+  : "${RVIZ_NS:=}"
+  export RRV_PROFILE RMW REMOTE_CONTAINER ROS_DOMAIN_ID TRANSPORT_HOST EXTRA_APT OVERLAY_WS RVIZ_NS
 }
 
 # --- ssh --------------------------------------------------------------------
@@ -120,3 +123,11 @@ first_common() {
 }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# Run a script inside the remote container. The script travels over stdin
+# rather than through the ssh and `docker exec` command lines, so it can use
+# quotes, $ and backslashes freely -- nesting them through three levels of
+# shell quoting is how this file's earlier remote helpers grew their bugs.
+rcontainer_script() {
+  rsh_in "docker exec -i $R_CONTAINER sh -s"
+}

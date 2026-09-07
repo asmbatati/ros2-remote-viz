@@ -22,6 +22,7 @@ export RRV_ROOT
 . "$RRV_ROOT/lib/plan.sh"
 . "$RRV_ROOT/lib/rmw/load.sh"
 . "$RRV_ROOT/lib/msgs.sh"
+. "$RRV_ROOT/lib/pkgs.sh"
 
 usage() {
   cat <<USAGE
@@ -38,6 +39,8 @@ ${C_B}rrv${C_RST} - remote ROS 2 visualisation
   rrv msgs [sync] [--all]   fetch message types this machine cannot decode
                             (--all = everything in the container, not just
                              what is publishing right now)
+  rrv pkgs [sync|add|...]   build the robot's rviz plugin packages here, so
+                            their panels and displays load in rviz2
   rrv shell                 interactive shell where plain 'ros2 ...' hits the remote
   rrv run [profile] CMD...  run any ros2 command here, wired to the remote graph
   rrv shim install|remove   make bare 'ros2' reach the remote in every shell
@@ -88,7 +91,7 @@ cmd_detect() {
     "R_CONTAINER=$(printf '%q' "$R_CONTAINER")" "R_IMAGE=$(printf '%q' "$R_IMAGE")" \
     "R_NETMODE=$R_NETMODE" "R_DISTRO=$R_DISTRO" \
     "R_RMWS=$(printf '%q' "$R_RMWS")" "R_RMW_CUR=$(printf '%q' "$R_RMW_CUR")" \
-    "R_HAS_RVIZ=$R_HAS_RVIZ" \
+    "R_HAS_RVIZ=$R_HAS_RVIZ" "R_NS=$(printf '%q' "$R_NS")" \
     "P_RMW=$P_RMW" "P_MODE=$P_MODE" "P_IMAGE=$P_IMAGE" \
     "P_NEEDS_ROUTER=$P_NEEDS_ROUTER" "P_XHOST=$P_XHOST" \
     "P_REASON=$(printf '%q' "$P_REASON")"
@@ -100,10 +103,21 @@ cmd_plan() { need_detect "${1:-default}"; plan_show; }
 cmd_build() {
   need_detect "${1:-default}"
   [ "$P_MODE" = docker ] || { ok "native mode - nothing to build"; return 0; }
+  # A package staged in pkgs/ ships the real definitions; leaving its
+  # interface-only mirror in msgs/ would declare the same types twice and
+  # colcon would refuse the whole workspace.
+  pkgs_unshadow_msgs
+  local staged; staged="$(pkgs_staged)"
+  local pkg_apt=""
+  if [ -n "$staged" ]; then
+    step "Resolving build dependencies for $(printf '%s ' $staged)"
+    pkg_apt="$(pkgs_apt_list)"
+    [ -n "$pkg_apt" ] && dim "  $pkg_apt"
+  fi
   step "Building $P_IMAGE (ROS $R_DISTRO)"
   [ -n "$EXTRA_APT" ] && dim "  extra packages: $EXTRA_APT"
   docker build --build-arg ROS_DISTRO="$R_DISTRO" --build-arg RMW="$P_RMW" \
-    --build-arg EXTRA_APT="$EXTRA_APT" \
+    --build-arg EXTRA_APT="$EXTRA_APT" --build-arg PKG_APT="$pkg_apt" \
     -t "$P_IMAGE" -f "$RRV_ROOT/docker/Dockerfile.rviz" "$RRV_ROOT"
   ok "built $P_IMAGE"
 }
@@ -141,8 +155,22 @@ list_configs() {
   find "$d" -maxdepth 1 -name '*.rviz' -printf '%f\n' 2>/dev/null | sort
 }
 
+# Layouts shipped by the packages staged in pkgs/. A package with rviz panels
+# almost always ships the layout that docks them, and retyping that by hand is
+# how you end up with a window missing half the plugin you just built.
+# Prints "<name> <path>" pairs.
+list_pkg_configs() {
+  local d; d="$(PKGS_DIR)"
+  [ -d "$d" ] || return 0
+  find "$d" -mindepth 2 -name '*.rviz' \
+       -not -path '*/build/*' -not -path '*/install/*' -printf '%f %p\n' \
+    2>/dev/null | sed 's/\.rviz / /' | sort
+}
+
 # Accepts a bare name, a name with .rviz, or a path. Prints the absolute path,
 # or nothing when no layout was asked for and there is no default.
+# rviz/ is searched first: an edited copy there is meant to win over the
+# package's shipped original.
 resolve_config() {
   local name="$1" d; d="$(RVIZ_DIR)"
   if [ -z "$name" ]; then
@@ -153,10 +181,17 @@ resolve_config() {
   for c in "$name" "$d/$name" "$d/$name.rviz"; do
     [ -f "$c" ] && { readlink -f "$c"; return 0; }
   done
+  local n path
+  while read -r n path; do
+    [ "$n" = "${name%.rviz}" ] && { readlink -f "$path"; return 0; }
+  done < <(list_pkg_configs)
   local avail; avail="$(list_configs)"
+  local pavail; pavail="$(list_pkg_configs | awk '{print "  " $1}')"
   die "no rviz layout '$name'.
 Available in $(RVIZ_DIR):
-${avail:-  (none - drop a .rviz file there)}"
+${avail:-  (none - drop a .rviz file there)}${pavail:+
+Shipped by staged packages:
+$pavail}"
 }
 
 cmd_configs() {
@@ -167,8 +202,22 @@ cmd_configs() {
     dim "  (none yet - drop a .rviz file in $d)"
   else
     printf '%s\n' "$l" | sed 's/\.rviz$//' | sed 's/^/  /'
-    echo; dim "  open one with: rrv rviz <name>"
   fi
+  local pl; pl="$(list_pkg_configs)"
+  if [ -n "$pl" ]; then
+    echo; step "Shipped by staged packages"
+    printf '%s\n' "$pl" | while read -r n path; do
+      # rviz/ is searched first, so a copy there hides the package's original.
+      # Saying so here is the difference between "why did my edit do nothing"
+      # and "right, I am editing the copy".
+      if [ -f "$(RVIZ_DIR)/$n.rviz" ]; then
+        info "  $n  $C_DIM(${path#$RRV_ROOT/} - shadowed by rviz/$n.rviz)$C_RST"
+      else
+        info "  $n  $C_DIM(${path#$RRV_ROOT/})$C_RST"
+      fi
+    done
+  fi
+  echo; dim "  open one with: rrv rviz <name>"
 }
 
 # --- install ----------------------------------------------------------------
@@ -254,6 +303,9 @@ daemon_guard() {
 ros_setup() {
   local c="source /opt/ros/$R_DISTRO/setup.bash"
   c="$c; [ -f /opt/rrv_msgs/setup.bash ] && source /opt/rrv_msgs/setup.bash; true"
+  # Packages built from source, including any rviz plugins. Sourced after the
+  # mirrors so its real definitions win where both carry a package.
+  c="$c; [ -f /opt/rrv_pkgs/setup.bash ] && source /opt/rrv_pkgs/setup.bash; true"
   [ -n "$OVERLAY_WS" ] && c="$c && [ -f '$OVERLAY_WS/install/setup.bash' ] && source '$OVERLAY_WS/install/setup.bash'; true"
   echo "$c"
 }
@@ -347,12 +399,25 @@ cmd_rviz() {
   daemon_guard
   [ -n "$cfg" ] && info "  layout        $cfg"
 
+  # Run rviz2 inside the robot's namespace. Layouts shipped by plugin packages
+  # name their topics relatively and are launched that way on the robot; at the
+  # root, every display would subscribe to a topic that does not exist. The
+  # panels read the same namespace to find the nodes they drive.
+  # RVIZ_NS in the profile wins over what detect found; set it to "/" to stay
+  # at the root.
+  local ns="${RVIZ_NS:-${R_NS:-}}"
+  local -a nsargs=()
+  if [ -n "$ns" ] && [ "$ns" != "/" ]; then
+    nsargs=(--ros-args -r "__ns:=$ns")
+    info "  namespace     $ns"
+  fi
+
   step "Launching rviz2 ($P_MODE)"
   if [ "$P_MODE" = native ]; then
     # shellcheck disable=SC1090
     . "/opt/ros/$R_DISTRO/setup.bash"
     eval "$(rmw_local_node_env | env_exports)"
-    exec rviz2 "${cfgargs[@]}" "$@"
+    exec rviz2 "${cfgargs[@]}" "$@" "${nsargs[@]}"
   fi
 
   setup_xauth
@@ -372,9 +437,13 @@ cmd_rviz() {
     esac
   fi
 
+  # An rviz2 killed rather than closed (a timeout, a lost ssh session) leaves
+  # the container behind and --name then refuses to start a new one. The old
+  # one is dead weight by definition: there is only ever one rrv rviz2.
+  docker rm -f rrv-rviz >/dev/null 2>&1 || true
   exec docker run --rm --name rrv-rviz "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" \
     "${RRV_MOUNTARGS[@]}" "${rvizmount[@]}" "${RRV_OVERLAY[@]}" \
-    "$P_IMAGE" bash -lc "$(ros_setup) && exec rviz2$(argv_str "${cfgargs[@]}" "$@")"
+    "$P_IMAGE" bash -lc "$(ros_setup) && exec rviz2$(argv_str "${cfgargs[@]}" "$@" "${nsargs[@]}")"
 }
 
 cmd_run() {
@@ -622,6 +691,23 @@ cmd_doctor() {
   fi
   [ "$P_MODE" = docker ] && { docker image inspect "$P_IMAGE" >/dev/null 2>&1 \
     && ok "image $P_IMAGE present" || { warn "image $P_IMAGE missing - run: rrv build"; fail=1; }; }
+
+  # rviz plugins built from source. Absent from the image, a panel just never
+  # appears in rviz2's Panels menu and nothing is logged.
+  if [ "$P_MODE" = docker ] && [ -n "$(pkgs_staged)" ] \
+     && docker image inspect "$P_IMAGE" >/dev/null 2>&1; then
+    local pv line
+    pv="$(pkgs_verify_image)"
+    if [ -n "$pv" ]; then
+      while IFS= read -r line; do
+        case "$line" in
+          OK*)      ok "rviz plugin ${line#OK }" ;;
+          MISSING*) warn "rviz plugin not in the image: ${line#MISSING }
+     Re-run: rrv build"; fail=1 ;;
+        esac
+      done <<< "$pv"
+    fi
+  fi
   # A daemon whose rclpy context has died keeps answering, with
   # Fault 1 "!rclpy.ok()", so every ros2 command in the container fails.
   local rout
@@ -703,6 +789,7 @@ case "$cmd" in
   x11)     parse_opts "$@"; cmd_x11    "$(profile_or_arg "${RRV_ARGS[0]:-}")" ;;
   configs) parse_opts "$@"; cmd_configs ;;
   msgs)    parse_opts "$@"; need_detect "$(profile_only)"; cmd_msgs "${RRV_ARGS[@]}" ;;
+  pkgs)    parse_opts "$@"; need_detect "$(profile_only)"; cmd_pkgs "${RRV_ARGS[@]}" ;;
   shell)   parse_opts "$@"; cmd_shell   "$(profile_only)" ;;
   shim)    parse_opts "$@"; cmd_shim    "${RRV_ARGS[@]}" ;;
   rviz)    parse_opts "$@"; cmd_rviz   "$(profile_only)" "${RRV_ARGS[@]}" ;;

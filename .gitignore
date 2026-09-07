@@ -5,3 +5,9 @@ config/*.env
 # Layouts are yours to keep local; commit one deliberately with:
 #   git add -f rviz/<name>.rviz
 rviz/*.rviz
+
+# Working copies of the robot's packages, staged by "rrv pkgs sync". They are
+# other repositories' source, and must match the robot rather than this repo's
+# history: re-sync them instead of committing them.
+pkgs/*
+!pkgs/README.md

@@ -33,6 +33,7 @@ msgs_local_packages() {
   docker run --rm "$P_IMAGE" bash -lc \
     'source /opt/ros/'"$R_DISTRO"'/setup.bash 2>/dev/null; \
      [ -f /opt/rrv_msgs/setup.bash ] && source /opt/rrv_msgs/setup.bash; \
+     [ -f /opt/rrv_pkgs/setup.bash ] && source /opt/rrv_pkgs/setup.bash; \
      ros2 pkg list' 2>/dev/null | tr -d '\r' | sort -u
 }
 

@@ -45,6 +45,7 @@ distro, while keeping the GPU, so you get matching ROS and local rendering.
 | `rrv install` | Symlink `rrv` into `~/.local/bin` so it runs from any directory |
 | `rrv configs` | List the `.rviz` layouts in `rviz/` |
 | `rrv msgs [sync]` | Find message types this machine cannot decode, and fetch them |
+| `rrv pkgs [sync]` | Build the robot's rviz plugin packages here, so their panels load |
 | `rrv detect` | Probe both machines, choose an RMW and a run mode, cache it |
 | `rrv plan` | Show what was chosen, and why |
 | `rrv build` | Build the local rviz2 image for the remote's ROS distro |
@@ -150,6 +151,55 @@ It splits the missing packages two ways:
 those messages locally. It must be built for **this** machine's architecture —
 an arm64 build from the robot will not load on an x86 host.
 
+### Custom rviz plugins
+
+A panel or display plugin is not a message definition — it is **compiled code**
+that rviz2 `dlopen()`s at start-up. Mirroring it the way `msgs/` mirrors
+interfaces is not possible, and the robot's own build is the wrong architecture
+(aarch64 on a Jetson) to copy. It has to be built here, from source.
+
+`rrv pkgs` does that, and finds the packages by itself — it looks for a source
+tree in the container whose `plugin_description.xml` declares an
+`rviz_common::` class:
+
+```
+rrv pkgs                # what ships rviz plugins there, and what is staged here
+rrv pkgs sync           # copy their sources into pkgs/
+rrv build               # compile them into the image
+```
+
+`rrv build` reads the staged `package.xml` files, resolves each dependency to
+an apt package that actually exists, and installs those before compiling; you
+do not list them anywhere. `rrv pkgs deps` shows what it worked out.
+
+Sources come from the **robot**, not from a local clone, on purpose: the panels
+drive the robot's nodes over topics and services, so the two must be the same
+version. A clone that has drifted ahead compiles cleanly and then fails at
+runtime, which is the hardest kind of failure to read. `rrv pkgs add <path>`
+stages a local directory when the sources are not in the container.
+
+A staged package supersedes its interface-only mirror in `msgs/` — it carries
+the real definitions — and `rrv build` removes the shadowed mirror for you,
+because two packages declaring the same types make colcon reject the workspace.
+
+`rrv doctor` checks each plugin is actually in the image: the manifest, the
+library it names, and the ament index entry that points rviz_common at it. A
+missing one of the three is otherwise invisible — the panel is simply absent
+from rviz2's **Panels** menu, with nothing logged anywhere.
+
+### The namespace rviz2 runs in
+
+Packages that ship rviz panels name the topics in their layouts **relatively**,
+because their own launch files put rviz2 in the vehicle's namespace and let ROS
+resolve them. Open such a layout at the root and every display subscribes to a
+topic that does not exist — and the panels, which read rviz2's namespace to find
+the nodes they drive, sit there showing *no data* next to a perfectly healthy
+robot.
+
+`rrv detect` works the namespace out from the robot's own topics and `rrv rviz`
+runs in it, printing which one it used. Override with `RVIZ_NS` in the profile;
+`RVIZ_NS=/` pins rviz2 to the root.
+
 ### The ros2 CLI daemon
 
 The `ros2` CLI keeps a daemon on `127.0.0.1:(11511+ROS_DOMAIN_ID)`. rrv's
@@ -180,6 +230,12 @@ rrv configs           # list what is in rviz/
 The folder is mounted read-write at the same path inside the container, so
 **Save Config** in rviz2 writes back to `rviz/` and survives the container —
 commit the file and the layout travels with the repo.
+
+Packages staged in `pkgs/` almost always ship the layout that docks their own
+panels, and those are openable by name too — `rrv configs` lists them under
+*Shipped by staged packages*. `rviz/` is searched first, so a copy there
+overrides the package's original; `rrv configs` marks which ones are shadowed,
+since editing a copy that nothing opens is an easy afternoon to lose.
 
 ## RMW support
 

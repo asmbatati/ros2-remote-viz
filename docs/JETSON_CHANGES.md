@@ -33,6 +33,27 @@ Remove all of them with:
     ssh nvidia@192.168.1.118 'rm -f ~/jetson_zenoh_router.sh /tmp/rrv-fastdds-remote.xml; \
       docker exec ihunter rm -f /tmp/.docker.xauth /tmp/rrv-fastdds-remote.xml'
 
+## 2b. `/root/.gitconfig` inside `ihunter` (2026-09-07)
+
+While identifying which commit of `geo_tuner` and `mav_navigator_ros` the robot
+runs, git refused to read those repositories: they are owned by a different uid
+than the one `docker exec` lands on, so git's `dubious ownership` guard fired.
+I ran, **inside the container only**:
+
+    git config --global --add safe.directory '*'
+
+That created `/root/.gitconfig` with a `[safe] directory = *` entry. It affects
+nothing but git's ownership check, and only for root inside `ihunter`. It is
+also the reason the version check works at all — worth keeping if you want
+`rrv pkgs` to keep reporting which commit is staged.
+
+**To undo:**
+
+    ssh nvidia@192.168.1.118 'docker exec ihunter rm -f /root/.gitconfig'
+
+Nothing else was written this round: staging the packages copies files *out* of
+the container with `tar`, and reads nothing else.
+
 ## 3. Processes
 
 A Zenoh router (`rmw_zenohd`) is **currently running inside `ihunter`**, started
