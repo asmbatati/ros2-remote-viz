@@ -158,7 +158,13 @@ pkgs_apt_resolve() {
 "
   done
   [ -n "$spec" ] || return 0
-  printf '%s' "$spec" | docker run --rm -i "$P_IMAGE" bash -c '
+  # $P_IMAGE is what this resolution is FOR, so on a first build it does not
+  # exist yet and every lookup would come back empty -- the packages would then
+  # be missing from the build with no explanation but a CMake "could not find".
+  # The base image carries the same apt sources, which is all we need here.
+  local img="$P_IMAGE"
+  docker image inspect "$img" >/dev/null 2>&1 || img="osrf/ros:$R_DISTRO-desktop"
+  printf '%s' "$spec" | docker run --rm -i "$img" bash -c '
     apt-get update -qq >/dev/null 2>&1
     while IFS=: read -r key cands; do
       [ -n "$key" ] || continue
@@ -183,8 +189,13 @@ pkgs_apt_list() {
     tail -n +2 "$cachef"; return 0
   fi
   local list; list="$(pkgs_dep_keys | pkgs_apt_resolve | tr '\n' ' ')"
-  mkdir -p "$RRV_CACHE"
-  { echo "$stamp"; echo "$list"; } > "$cachef"
+  # Only cache a real answer. An empty one means the resolver could not run
+  # (no image, no network); caching that would make every later build silently
+  # install nothing, long after the cause was fixed.
+  if [ -n "${list// /}" ]; then
+    mkdir -p "$RRV_CACHE"
+    { echo "$stamp"; echo "$list"; } > "$cachef"
+  fi
   echo "$list"
 }
 
