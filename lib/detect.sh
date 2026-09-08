@@ -20,7 +20,10 @@ detect_local() {
   step "Local machine"
   L_OS=$(. /etc/os-release 2>/dev/null && echo "${NAME:-linux} ${VERSION_ID:-}")
   L_ARCH=$(uname -m)
-  L_DISTROS=$(ls /opt/ros 2>/dev/null | tr '\n' ' ')
+  # No local ROS at all is a normal case -- the container supplies it. Under
+  # `set -eo pipefail` a failing `ls` here would abort detect before it printed
+  # anything, so swallow it rather than let it end the pipeline non-zero.
+  L_DISTROS=$( { ls /opt/ros 2>/dev/null || true; } | tr '\n' ' ')
   L_DOCKER=no; have_cmd docker && docker info >/dev/null 2>&1 && L_DOCKER=yes
   L_NVIDIA_RT=no
   [ "$L_DOCKER" = yes ] && docker info --format '{{json .Runtimes}}' 2>/dev/null \
