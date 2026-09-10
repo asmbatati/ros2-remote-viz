@@ -51,6 +51,7 @@ distro, while keeping the GPU, so you get matching ROS and local rendering.
 | `rrv build` | Build the local rviz2 image for the remote's ROS distro |
 | `rrv up` | Start whatever daemons the chosen RMW needs |
 | `rrv rviz [layout]` | Launch rviz2 here, optionally with a saved layout |
+| `rrv launch PKG FILE` | Run a package's own GUI launch file here — rviz2 with its panels, layout and support nodes |
 | `rrv shell` | Interactive shell where plain `ros2 ...` hits the remote graph |
 | `rrv run CMD` | Run any ros2 command here, wired to the remote graph |
 | `rrv shim install` | Make bare `ros2` reach the remote in every shell (opt-in) |
