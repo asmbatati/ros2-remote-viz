@@ -334,6 +334,32 @@ build_env_args() {
 }
 env_exports() { while IFS= read -r l; do [ -n "$l" ] && printf 'export %q\n' "$l"; done; }
 
+# The local router's connect endpoint is fixed at the moment it starts. Switching
+# profiles -- to a second robot, or to the SAME robot on another network, which
+# is what happens when a vehicle moves from the lab wifi to the field one --
+# leaves a router still dialling the previous address. Nothing about it looks
+# wrong: `docker ps` shows rrv-router up, `rrv up` says "already running", rviz2
+# opens, and the graph is simply empty. So compare what the running one was told
+# against what this profile needs, rather than trusting the container's name.
+router_env_matches() {
+  local have e
+  have="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' rrv-router 2>/dev/null)"
+  for e in "${RRV_ENVARGS[@]}"; do
+    [ "$e" = "-e" ] && continue
+    printf '%s\n' "$have" | grep -qxF "$e" || return 1
+  done
+  return 0
+}
+
+start_local_router() {
+  docker run -d --rm --name rrv-router --network host \
+    "${RRV_ENVARGS[@]}" "$P_IMAGE" \
+    bash -lc "$(rmw_local_daemon_cmd)" >/dev/null
+  sleep 4
+  docker ps --format '{{.Names}}' | grep -qx rrv-router \
+    && ok "local router up" || die "local router failed - check: docker logs rrv-router"
+}
+
 cmd_up() {
   need_detect "${1:-default}"
   rmw_remote_prepare
@@ -350,17 +376,18 @@ cmd_up() {
     rsh "docker exec $R_CONTAINER pgrep -f rmw_zenohd >/dev/null 2>&1" \
       && ok "remote router up" || die "remote router failed to start"
   fi
+  build_env_args rmw_local_daemon_env
   if docker ps --format '{{.Names}}' | grep -qx rrv-router; then
-    ok "local router already running"
+    if router_env_matches; then
+      ok "local router already running"
+    else
+      step "Restarting local router (it was pointed at another address)"
+      docker rm -f rrv-router >/dev/null 2>&1 || true
+      start_local_router
+    fi
   else
     step "Starting local router"
-    build_env_args rmw_local_daemon_env
-    docker run -d --rm --name rrv-router --network host \
-      "${RRV_ENVARGS[@]}" "$P_IMAGE" \
-      bash -lc "$(rmw_local_daemon_cmd)" >/dev/null
-    sleep 4
-    docker ps --format '{{.Names}}' | grep -qx rrv-router \
-      && ok "local router up" || die "local router failed - check: docker logs rrv-router"
+    start_local_router
   fi
   daemon_flush
 }
