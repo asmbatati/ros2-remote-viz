@@ -35,6 +35,9 @@ ${C_B}rrv${C_RST} - remote ROS 2 visualisation
   rrv build [profile]       build the local rviz2 image (docker mode only)
   rrv up [profile]          start routers/daemons the chosen RMW needs
   rrv rviz [config]         launch rviz2 here (starts 'up' first if needed)
+  rrv launch PKG FILE [k:=v] run a GUI 'ros2 launch' here, against the remote
+                            graph -- for packages whose launch files bring up
+                            rviz2 with their own panels and layout
   rrv configs               list the .rviz layouts in rviz/
   rrv msgs [sync] [--all]   fetch message types this machine cannot decode
                             (--all = everything in the container, not just
@@ -331,6 +334,32 @@ build_env_args() {
 }
 env_exports() { while IFS= read -r l; do [ -n "$l" ] && printf 'export %q\n' "$l"; done; }
 
+# The local router's connect endpoint is fixed at the moment it starts. Switching
+# profiles -- to a second robot, or to the SAME robot on another network, which
+# is what happens when a vehicle moves from the lab wifi to the field one --
+# leaves a router still dialling the previous address. Nothing about it looks
+# wrong: `docker ps` shows rrv-router up, `rrv up` says "already running", rviz2
+# opens, and the graph is simply empty. So compare what the running one was told
+# against what this profile needs, rather than trusting the container's name.
+router_env_matches() {
+  local have e
+  have="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' rrv-router 2>/dev/null)"
+  for e in "${RRV_ENVARGS[@]}"; do
+    [ "$e" = "-e" ] && continue
+    printf '%s\n' "$have" | grep -qxF "$e" || return 1
+  done
+  return 0
+}
+
+start_local_router() {
+  docker run -d --rm --name rrv-router --network host \
+    "${RRV_ENVARGS[@]}" "$P_IMAGE" \
+    bash -lc "$(rmw_local_daemon_cmd)" >/dev/null
+  sleep 4
+  docker ps --format '{{.Names}}' | grep -qx rrv-router \
+    && ok "local router up" || die "local router failed - check: docker logs rrv-router"
+}
+
 cmd_up() {
   need_detect "${1:-default}"
   rmw_remote_prepare
@@ -347,17 +376,18 @@ cmd_up() {
     rsh "docker exec $R_CONTAINER pgrep -f rmw_zenohd >/dev/null 2>&1" \
       && ok "remote router up" || die "remote router failed to start"
   fi
+  build_env_args rmw_local_daemon_env
   if docker ps --format '{{.Names}}' | grep -qx rrv-router; then
-    ok "local router already running"
+    if router_env_matches; then
+      ok "local router already running"
+    else
+      step "Restarting local router (it was pointed at another address)"
+      docker rm -f rrv-router >/dev/null 2>&1 || true
+      start_local_router
+    fi
   else
     step "Starting local router"
-    build_env_args rmw_local_daemon_env
-    docker run -d --rm --name rrv-router --network host \
-      "${RRV_ENVARGS[@]}" "$P_IMAGE" \
-      bash -lc "$(rmw_local_daemon_cmd)" >/dev/null
-    sleep 4
-    docker ps --format '{{.Names}}' | grep -qx rrv-router \
-      && ok "local router up" || die "local router failed - check: docker logs rrv-router"
+    start_local_router
   fi
   daemon_flush
 }
@@ -444,6 +474,51 @@ cmd_rviz() {
   exec docker run --rm --name rrv-rviz "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" \
     "${RRV_MOUNTARGS[@]}" "${rvizmount[@]}" "${RRV_OVERLAY[@]}" \
     "$P_IMAGE" bash -lc "$(ros_setup) && exec rviz2$(argv_str "${cfgargs[@]}" "$@" "${nsargs[@]}")"
+}
+
+# Run a GUI `ros2 launch` locally against the remote graph.
+#
+# `rrv run` deliberately has no display plumbing, and `rrv rviz` can only start
+# bare rviz2 -- so neither can start a package's own ground-station launch file,
+# the one that brings up rviz2 with that package's panels, layout and support
+# nodes already wired together. That launch file is the thing a robot ships for
+# an operator to run; this is how it gets run on the operator's machine.
+#
+# Everything else is `rrv rviz`'s plumbing: the same GUI args, the same overlay,
+# the same read-write mount of rviz/ so a layout saved from inside lands back in
+# the repo. No namespace is injected -- a launch file takes its own arguments,
+# and inventing a __ns remap for it would fight them.
+cmd_launch() {
+  local p="$1"; shift
+  [ $# -ge 2 ] || die "usage: rrv launch [profile] <package> <launch_file> [arg:=value ...]"
+  [ -n "${DISPLAY:-}" ] || die "DISPLAY is unset - no X display to draw on"
+
+  cmd_up "$p"
+  need_detect "$p"
+  daemon_guard
+
+  step "Launching $1 $2 ($P_MODE)"
+  if [ "$P_MODE" = native ]; then
+    # shellcheck disable=SC1090
+    . "/opt/ros/$R_DISTRO/setup.bash"
+    eval "$(rmw_local_node_env | env_exports)"
+    exec ros2 launch "$@"
+  fi
+
+  setup_xauth
+  build_gui_args
+  build_env_args rmw_local_node_env
+  build_mount_args
+  overlay_mount
+  local -a rvizmount=()
+  [ -d "$(RVIZ_DIR)" ] && rvizmount=(-v "$(RVIZ_DIR):$(RVIZ_DIR):rw")
+
+  # As with rviz2: one launch at a time, and a killed one leaves the container
+  # behind, which --name would then refuse to reuse.
+  docker rm -f rrv-launch >/dev/null 2>&1 || true
+  exec docker run --rm --name rrv-launch "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" \
+    "${RRV_MOUNTARGS[@]}" "${rvizmount[@]}" "${RRV_OVERLAY[@]}" \
+    "$P_IMAGE" bash -lc "$(ros_setup) && exec ros2 launch$(argv_str "$@")"
 }
 
 cmd_run() {
@@ -664,7 +739,7 @@ cmd_x11() {
 cmd_down() {
   need_detect "${1:-default}"
   step "Stopping"
-  docker rm -f rrv-rviz rrv-router >/dev/null 2>&1 && ok "local containers stopped" || dim "  no local containers"
+  docker rm -f rrv-rviz rrv-launch rrv-router >/dev/null 2>&1 && ok "local containers stopped" || dim "  no local containers"
   if [ "$P_NEEDS_ROUTER" = yes ]; then
     rsh "docker exec $R_CONTAINER pkill -f rmw_zenohd" >/dev/null 2>&1 \
       && ok "remote router stopped" || dim "  no remote router"
@@ -793,6 +868,7 @@ case "$cmd" in
   shell)   parse_opts "$@"; cmd_shell   "$(profile_only)" ;;
   shim)    parse_opts "$@"; cmd_shim    "${RRV_ARGS[@]}" ;;
   rviz)    parse_opts "$@"; cmd_rviz   "$(profile_only)" "${RRV_ARGS[@]}" ;;
+  launch)  parse_opts "$@"; cmd_launch "$(profile_only)" "${RRV_ARGS[@]}" ;;
   run)     parse_opts "$@"; cmd_run    "$(profile_only)" "${RRV_ARGS[@]}" ;;
   remote)  parse_opts "$@"; cmd_remote "$(profile_only)" "${RRV_ARGS[@]}" ;;
   ''|-h|--help|help) usage ;;

@@ -8,6 +8,18 @@
 
 MSGS_DIR() { echo "$RRV_ROOT/msgs"; }
 
+# Packages staged in pkgs/ carry their real definitions and supersede any
+# mirror here (pkgs_unshadow_msgs removes one on sight). Count them as
+# available even before `rrv build` has baked them into the image, so a sync
+# run in that window does not regenerate a mirror the next pkgs sync deletes.
+msgs_pkgs_staged() {
+  local d
+  for d in "$RRV_ROOT/pkgs"/*/; do
+    [ -f "$d/package.xml" ] || continue
+    sed -n 's:.*<name>\([^<]*\)</name>.*:\1:p' "$d/package.xml" | head -1
+  done 2>/dev/null | sort -u
+}
+
 # Message packages currently on the ROS graph.
 msgs_graph_packages() {
   "$RRV_ROOT/bin/rrv" run -p "$RRV_PROFILE" ros2 topic list -t 2>/dev/null \
@@ -141,7 +153,7 @@ cmd_msgs() {
 Is the remote actually publishing? Try: rrv run ros2 topic list
 To take everything the container has instead:  rrv msgs sync --all"
   fi
-  local_pkgs="$(msgs_local_packages)"
+  local_pkgs="$(printf '%s\n' "$(msgs_local_packages)" "$(msgs_pkgs_staged)" | sort -u)"
   missing="$(comm -23 <(printf '%s\n' "$graph") <(printf '%s\n' "$local_pkgs"))"
 
   if [ -z "$missing" ]; then
