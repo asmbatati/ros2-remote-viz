@@ -217,6 +217,19 @@ it is not. rrv stops a foreign-distro daemon automatically before each run, and
 running, your local `ros2` may hit *their* daemon — `RRV_SHIM_BYPASS=1` does not
 help there, so stop the containers with `rrv down` first.
 
+## Console logs
+
+`rrv rviz` and `rrv launch` tee everything rviz2 prints -- including what plugin
+panels report, such as a refused or unanswered service call -- to a timestamped
+file, so it outlives the terminal and can be lined up with the robot's logs:
+
+```
+~/rrv_logs/rviz_20260916-104102.log
+~/rrv_logs/launch_ground_station_navigator.launch_20260916-104102.log
+```
+
+`RRV_LOG_DIR` picks the folder; `RRV_LOG=0` turns it off.
+
 ## rviz layouts
 
 Drop `.rviz` files into `rviz/` and open one by name:

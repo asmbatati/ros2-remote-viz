@@ -413,6 +413,34 @@ daemon_flush() {
   return 0
 }
 
+# Keep a GUI session's console. rviz2 and `ros2 launch` print what a panel
+# reports -- a refused service, a reply that never came -- to stdout, and the
+# container is --rm: once the terminal scrolls or closes, nobody can say what
+# the operator saw, or line it up against the robot's own logs afterwards. So
+# the console is teed to $RRV_LOG_DIR (default ~/rrv_logs), one timestamped file
+# per session. RRV_LOG=0 turns it off.
+#
+# tee ignores SIGINT: Ctrl-C reaches the docker client (which forwards it into
+# the container) and rviz2's shutdown output still lands in the file; tee ends
+# at EOF when the container does.
+run_logged() {
+  local name="$1"; shift
+  [ "${RRV_LOG:-1}" = 0 ] && exec "$@"
+  local dir="${RRV_LOG_DIR:-$HOME/rrv_logs}"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    warn "cannot create $dir - running without a console log"
+    exec "$@"
+  fi
+  local log; log="$dir/${name}_$(date +%Y%m%d-%H%M%S).log"
+  info "  console log   $log"
+  printf '# rrv %s  started %s  host %s\n' "$name" "$(date -Is)" "$(hostname)" > "$log"
+  set +e
+  "$@" 2>&1 | ( trap '' INT; exec tee -a "$log" )
+  local rc="${PIPESTATUS[0]}"
+  printf '# rrv %s  exited %s  status %s\n' "$name" "$(date -Is)" "$rc" >> "$log"
+  exit "$rc"
+}
+
 cmd_rviz() {
   local p="$1"; shift
   local want=""
@@ -447,7 +475,7 @@ cmd_rviz() {
     # shellcheck disable=SC1090
     . "/opt/ros/$R_DISTRO/setup.bash"
     eval "$(rmw_local_node_env | env_exports)"
-    exec rviz2 "${cfgargs[@]}" "$@" "${nsargs[@]}"
+    run_logged rviz rviz2 "${cfgargs[@]}" "$@" "${nsargs[@]}"
   fi
 
   setup_xauth
@@ -471,7 +499,7 @@ cmd_rviz() {
   # the container behind and --name then refuses to start a new one. The old
   # one is dead weight by definition: there is only ever one rrv rviz2.
   docker rm -f rrv-rviz >/dev/null 2>&1 || true
-  exec docker run --rm --name rrv-rviz "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" \
+  run_logged rviz docker run --rm --name rrv-rviz "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" \
     "${RRV_MOUNTARGS[@]}" "${rvizmount[@]}" "${RRV_OVERLAY[@]}" \
     "$P_IMAGE" bash -lc "$(ros_setup) && exec rviz2$(argv_str "${cfgargs[@]}" "$@" "${nsargs[@]}")"
 }
@@ -502,7 +530,7 @@ cmd_launch() {
     # shellcheck disable=SC1090
     . "/opt/ros/$R_DISTRO/setup.bash"
     eval "$(rmw_local_node_env | env_exports)"
-    exec ros2 launch "$@"
+    run_logged "launch_$(basename "$2" .py)" ros2 launch "$@"
   fi
 
   setup_xauth
@@ -516,7 +544,7 @@ cmd_launch() {
   # As with rviz2: one launch at a time, and a killed one leaves the container
   # behind, which --name would then refuse to reuse.
   docker rm -f rrv-launch >/dev/null 2>&1 || true
-  exec docker run --rm --name rrv-launch "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" \
+  run_logged "launch_$(basename "$2" .py)" docker run --rm --name rrv-launch "${RRV_GUIARGS[@]}" "${RRV_ENVARGS[@]}" \
     "${RRV_MOUNTARGS[@]}" "${rvizmount[@]}" "${RRV_OVERLAY[@]}" \
     "$P_IMAGE" bash -lc "$(ros_setup) && exec ros2 launch$(argv_str "$@")"
 }
